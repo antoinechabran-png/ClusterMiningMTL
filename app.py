@@ -333,6 +333,31 @@ def compute_tfidf_scores(token_lists):
     vocab = vectorizer.get_feature_names_out()
     return dict(zip(vocab, sums))
 
+# ─── Clustering ────────────────────────────────────────────────────────────────
+def cluster_to_target(G, target_n, seed=42):
+    """Louvain community detection doesn't take a 'number of clusters' input —
+    it optimizes modularity and lands wherever the graph's structure implies.
+    Random seed barely moves that (it mostly just breaks ties), which is why
+    searching over seeds alone was unreliable. The actual lever for cluster
+    granularity is Louvain's `resolution` parameter — higher values favor
+    more, smaller communities; lower values favor fewer, larger ones — so we
+    search over that instead. Returns (partition, achieved_diff) where
+    achieved_diff is 0 only if the target was hit exactly; Louvain may not be
+    able to reach some counts on a given graph no matter the resolution."""
+    resolutions = [
+        0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
+        1.1, 1.2, 1.4, 1.6, 1.8, 2.0, 2.5, 3.0, 4.0, 5.0, 7.0, 10.0,
+    ]
+    best_p, best_diff = None, 10 ** 9
+    for res in resolutions:
+        p = community_louvain.best_partition(G, resolution=res, random_state=seed)
+        diff = abs(len(set(p.values())) - target_n)
+        if diff < best_diff:
+            best_diff, best_p = diff, p
+        if diff == 0:
+            break
+    return best_p, best_diff
+
 # ─── Network builder ─────────────────────────────────────────────────────────
 def build_html(G, partition, word_freq, color_map, size_map=None, word_sent=None, filename="semantic_map"):
     cluster_ids = sorted(set(partition.values()))
@@ -952,7 +977,13 @@ with st.sidebar:
     uploaded_file = st.file_uploader("📂 Upload Excel corpus", type=["xlsx"])
     st.markdown("---")
     min_freq   = st.slider("Min word occurrences",         1, 50,  5)
-    min_edge   = st.slider("Min connection strength",      1, 20,  3)
+    min_edge   = st.slider(
+        "Min connection strength", 1, 20, 3,
+        help="How many verbatims two words must co-occur in together before "
+             "a line is drawn between them on the map. Higher = fewer, "
+             "stronger connections shown (a sparser, cleaner graph); "
+             "lower = more connections shown, including weaker/noisier ones.",
+    )
     n_clusters = st.slider("Target number of clusters",    2, 10,  5)
     st.markdown("---")
     st.caption("🔤 Phrases & weighting")
@@ -1053,13 +1084,9 @@ if uploaded_file:
             else:
                 size_map = {n: word_freq[n] for n in G.nodes()}
 
-            # ── Louvain clustering ──────────────────────────────────────────
-            best_p, best_d = None, 999
-            for seed in range(30):
-                p    = community_louvain.best_partition(G, random_state=seed)
-                diff = abs(len(set(p.values())) - n_clusters)
-                if diff < best_d:
-                    best_d, best_p = diff, p
+            # ── Louvain clustering — resolution search, not seed search
+            #    (see cluster_to_target docstring for why). ──────────────────
+            best_p, best_d = cluster_to_target(G, n_clusters)
 
             # ── Spring layout → fixed pixel coords ─────────────────────────
             pos = nx.spring_layout(G, seed=42, k=3.5 / max(1, len(G.nodes) ** 0.5))
@@ -1102,6 +1129,8 @@ if uploaded_file:
                 "resp_df": resp_df,
                 "text_col": col,
                 "using_tfidf": use_tfidf,
+                "target_n_clusters": n_clusters,
+                "cluster_match_diff": best_d,
             }
             # New analysis → reset custom cluster colors to the default
             # palette (a prior custom pick may not even make sense if the
@@ -1125,6 +1154,8 @@ if "results" in st.session_state:
     resp_df      = res.get("resp_df")
     text_col     = res.get("text_col")
     using_tfidf  = res.get("using_tfidf", False)
+    target_n_clusters  = res.get("target_n_clusters")
+    cluster_match_diff = res.get("cluster_match_diff", 0)
 
     # ── Custom cluster colors ────────────────────────────────────────────────
     with st.expander("🎨 Cluster colors", expanded=False):
@@ -1151,6 +1182,13 @@ if "results" in st.session_state:
 
     # ── Cluster summary cards ───────────────────────────────────────────────
     st.markdown("### Cluster overview")
+    if target_n_clusters and cluster_match_diff:
+        st.caption(
+            f"Found **{len(cluster_ids)} clusters** — the closest achievable match to your target of "
+            f"{target_n_clusters} for this graph (Louvain community detection can't be forced to an exact "
+            "count). Try adjusting 'Min connection strength' or 'Min word occurrences' too — they reshape "
+            "the graph itself and can shift how many natural clusters it settles into."
+        )
     if using_tfidf:
         st.caption("Sizing by TF-IDF weight (enabled in the sidebar) — words distinctive to a cluster stand out, not just frequent ones.")
     card_cols = st.columns(len(cluster_ids))
