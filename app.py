@@ -341,12 +341,22 @@ def cluster_to_target(G, target_n, seed=42):
     searching over seeds alone was unreliable. The actual lever for cluster
     granularity is Louvain's `resolution` parameter — higher values favor
     more, smaller communities; lower values favor fewer, larger ones — so we
-    search over that instead. Returns (partition, achieved_diff) where
-    achieved_diff is 0 only if the target was hit exactly; Louvain may not be
-    able to reach some counts on a given graph no matter the resolution."""
+    search over that instead.
+
+    Hard floor: modularity optimization can never merge two fully
+    disconnected pieces of the graph into one community — doing so always
+    makes modularity worse, so no resolution value will ever do it. That
+    means the number of connected components in G is a hard lower bound on
+    how few clusters are achievable, independent of resolution.
+
+    Returns (partition, achieved_diff, n_components) — achieved_diff is 0
+    only if the target was hit exactly; n_components is the hard floor
+    explained above."""
+    n_components = nx.number_connected_components(G)
     resolutions = [
-        0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
-        1.1, 1.2, 1.4, 1.6, 1.8, 2.0, 2.5, 3.0, 4.0, 5.0, 7.0, 10.0,
+        0.005, 0.01, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,
+        0.8, 0.9, 1.0, 1.1, 1.2, 1.4, 1.6, 1.8, 2.0, 2.5, 3.0, 4.0, 5.0,
+        7.0, 10.0, 15.0, 20.0,
     ]
     best_p, best_diff = None, 10 ** 9
     for res in resolutions:
@@ -356,7 +366,7 @@ def cluster_to_target(G, target_n, seed=42):
             best_diff, best_p = diff, p
         if diff == 0:
             break
-    return best_p, best_diff
+    return best_p, best_diff, n_components
 
 # ─── Network builder ─────────────────────────────────────────────────────────
 def build_html(G, partition, word_freq, color_map, size_map=None, word_sent=None, filename="semantic_map"):
@@ -984,7 +994,17 @@ with st.sidebar:
              "stronger connections shown (a sparser, cleaner graph); "
              "lower = more connections shown, including weaker/noisier ones.",
     )
-    n_clusters = st.slider("Target number of clusters",    2, 10,  5)
+    n_clusters = st.slider(
+        "Target number of clusters", 2, 10, 5,
+        help="Best-effort target, not an exact count. Clustering can raise the "
+             "number of groups fairly freely, but it can never merge two fully "
+             "disconnected sets of words into one cluster — so if your filters "
+             "split the graph into several separate 'islands' with no "
+             "connections between them, that number of islands becomes a hard "
+             "floor no matter how low you set this. Lowering 'Min connection "
+             "strength' or 'Min word occurrences' usually helps reach a lower "
+             "target, since it lets more words connect to each other.",
+    )
     st.markdown("---")
     st.caption("🔤 Phrases & weighting")
     use_phrases = st.checkbox("Detect common phrases (bigrams)", value=True, key="use_phrases")
@@ -1086,7 +1106,7 @@ if uploaded_file:
 
             # ── Louvain clustering — resolution search, not seed search
             #    (see cluster_to_target docstring for why). ──────────────────
-            best_p, best_d = cluster_to_target(G, n_clusters)
+            best_p, best_d, n_components = cluster_to_target(G, n_clusters)
 
             # ── Spring layout → fixed pixel coords ─────────────────────────
             pos = nx.spring_layout(G, seed=42, k=3.5 / max(1, len(G.nodes) ** 0.5))
@@ -1131,6 +1151,7 @@ if uploaded_file:
                 "using_tfidf": use_tfidf,
                 "target_n_clusters": n_clusters,
                 "cluster_match_diff": best_d,
+                "n_components": n_components,
             }
             # New analysis → reset custom cluster colors to the default
             # palette (a prior custom pick may not even make sense if the
@@ -1156,6 +1177,7 @@ if "results" in st.session_state:
     using_tfidf  = res.get("using_tfidf", False)
     target_n_clusters  = res.get("target_n_clusters")
     cluster_match_diff = res.get("cluster_match_diff", 0)
+    n_components       = res.get("n_components")
 
     # ── Custom cluster colors ────────────────────────────────────────────────
     with st.expander("🎨 Cluster colors", expanded=False):
@@ -1183,12 +1205,22 @@ if "results" in st.session_state:
     # ── Cluster summary cards ───────────────────────────────────────────────
     st.markdown("### Cluster overview")
     if target_n_clusters and cluster_match_diff:
-        st.caption(
-            f"Found **{len(cluster_ids)} clusters** — the closest achievable match to your target of "
-            f"{target_n_clusters} for this graph (Louvain community detection can't be forced to an exact "
-            "count). Try adjusting 'Min connection strength' or 'Min word occurrences' too — they reshape "
-            "the graph itself and can shift how many natural clusters it settles into."
-        )
+        if n_components and target_n_clusters < n_components:
+            st.caption(
+                f"Found **{len(cluster_ids)} clusters** — with the current filters, this graph splits into "
+                f"**{n_components} separate, disconnected groups of words** with no links between them at all. "
+                f"Clustering can never merge fully disconnected groups into one cluster (there's nothing to base "
+                f"a merge on), so {n_components} is a hard floor here — you can't go below it just by raising "
+                "the target. Lower 'Min connection strength' or 'Min word occurrences' to let more words connect "
+                "to each other, which can reduce the number of disconnected groups."
+            )
+        else:
+            st.caption(
+                f"Found **{len(cluster_ids)} clusters** — the closest achievable match to your target of "
+                f"{target_n_clusters} for this graph (Louvain community detection can't be forced to an exact "
+                "count). Try adjusting 'Min connection strength' or 'Min word occurrences' too — they reshape "
+                "the graph itself and can shift how many natural clusters it settles into."
+            )
     if using_tfidf:
         st.caption("Sizing by TF-IDF weight (enabled in the sidebar) — words distinctive to a cluster stand out, not just frequent ones.")
     card_cols = st.columns(len(cluster_ids))
