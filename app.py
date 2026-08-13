@@ -255,6 +255,78 @@ def preprocess(text, lang_code, lemmatizer_en, spacy_nlp, custom_stops, stop_wor
         if lemma not in stop_words and lemma not in custom_stops and len(lemma) > 2
     ]
 
+def build_subcorpus_mask(texts, keywords):
+    """Selects rows for an optional sub-corpus: True if the RAW verbatim text
+    (before any tokenization/lemmatization) contains at least one of the
+    given keywords/phrases as a whole word (case-insensitive). Deliberately
+    NOT run on lemmatized tokens — see the sidebar help text for why:
+    lemma behavior differs across languages (English is noun-only; the
+    spaCy-backed languages are POS-aware), so raw-text matching is the only
+    version that means the same thing regardless of language and matches
+    what the user actually typed."""
+    if not keywords:
+        return [True] * len(texts)
+    patterns = [re.compile(r"\b" + re.escape(kw) + r"\b", re.IGNORECASE | re.UNICODE) for kw in keywords]
+    mask = []
+    for t in texts:
+        if not isinstance(t, str) or not t.strip():
+            mask.append(False)
+            continue
+        mask.append(any(p.search(t) for p in patterns))
+    return mask
+
+# ─── Spelling correction (optional) ────────────────────────────────────────────
+@st.cache_resource
+def load_spellchecker(lang_code):
+    """pure-Python, dictionary-based, no compiled dependencies — deliberately
+    avoided anything requiring a native build given past deployment pain.
+    Returns None (rather than raising) if this language's dictionary isn't
+    bundled, so the caller can degrade gracefully with a warning instead of
+    crashing."""
+    try:
+        from spellchecker import SpellChecker
+        # distance=1 (only single-character-edit fixes) rather than the
+        # default 2 — more conservative, less likely to "correct" a
+        # legitimate niche or brand-specific word into an unrelated one.
+        return SpellChecker(language=lang_code, distance=1)
+    except Exception:
+        return None
+
+def build_spelling_corrections(texts, spellchecker):
+    """Corrects each UNIQUE unknown word once (not per occurrence — verbatim
+    corpora repeat vocabulary heavily, so this avoids redundant work) and
+    returns (correction_map, occurrences_corrected)."""
+    word_counts = Counter()
+    for t in texts:
+        if isinstance(t, str):
+            word_counts.update(WORD_PATTERN.findall(t.lower()))
+    if not word_counts:
+        return {}, 0
+    unknown = spellchecker.unknown(word_counts.keys())
+    correction_map = {}
+    for w in unknown:
+        corrected = spellchecker.correction(w)
+        if corrected and corrected != w:
+            correction_map[w] = corrected
+    occurrences = sum(word_counts[w] for w in correction_map)
+    return correction_map, occurrences
+
+def apply_spelling_corrections(text, correction_map):
+    if not isinstance(text, str) or not text.strip() or not correction_map:
+        return text
+    def repl(m):
+        word = m.group(0)
+        lw = word.lower()
+        corrected = correction_map.get(lw)
+        if not corrected:
+            return word
+        if word.isupper():
+            return corrected.upper()
+        if word[0].isupper():
+            return corrected[:1].upper() + corrected[1:]
+        return corrected
+    return WORD_PATTERN.sub(repl, text)
+
 def display_label(word):
     """Phrase tokens are stored internally as 'easy_apply' (a valid, unique
     graph/dict key); shown to the user as 'easy apply'."""
@@ -1016,9 +1088,36 @@ with st.sidebar:
         help="Sizes words/bubbles/nodes by how distinctive they are across verbatims, "
              "instead of by raw occurrence count.",
     )
+    use_spellcheck = st.checkbox(
+        "✏️ Correct spelling before analysis (beta)", value=False, key="use_spellcheck",
+        help="Fixes likely typos using a general-purpose dictionary before tokenizing "
+             "— only single-character-edit fixes (conservative), e.g. 'frehs' → "
+             "'fresh'. Only affects the analysis (tokens, clustering, sentiment); the "
+             "original verbatim text is never changed in exports or respondent "
+             "drill-down. It can occasionally 'correct' a legitimate niche or "
+             "brand-specific word it doesn't recognize — a full list of every change "
+             "made appears after you generate the map, so you can review it. Not "
+             "guaranteed to be available for every verbatim language.",
+    )
     st.markdown("---")
     st.caption("ℹ️ After adding words here, click **Generate map** again to regenerate the analysis for newly excluded words.")
     user_extra_stops = st.text_area("Extra exclusion words (comma-sep):", "")
+    st.markdown("---")
+    st.caption("🎯 Sub-corpus filter (optional)")
+    subcorpus_input = st.text_area(
+        "Only analyze verbatims containing at least one of these words/phrases:",
+        "",
+        key="subcorpus_input",
+        placeholder="e.g. fresh, clean",
+        help="Leave empty to use the full corpus. Matches on the ORIGINAL verbatim "
+             "text — before lemmatization — so it means the same thing regardless "
+             "of language and doesn't depend on guessing a word's lemma form. "
+             "Whole-word, case-insensitive match: 'clean' matches 'very clean now' "
+             "but not inside 'uncleaned'. A verbatim is kept if it contains at "
+             "least one of the words/phrases you list (comma-separated) — not all "
+             "of them. Regenerate the map after changing this.",
+    )
+    subcorpus_words = [w.strip().lower() for w in subcorpus_input.split(",") if w.strip()]
 
 all_stops = set(
     DEFAULT_EXCLUSIONS_BY_LANG.get(lang_choice, [])
@@ -1031,6 +1130,13 @@ st.title("🌐 Semantic Relationship Map")
 if uploaded_file:
     df  = pd.read_excel(uploaded_file)
     col = st.selectbox("Text column", df.columns)
+
+    if subcorpus_words:
+        preview_mask = build_subcorpus_mask(df[col].tolist(), subcorpus_words)
+        st.caption(
+            f"🎯 Sub-corpus filter active — **{sum(preview_mask)} of {len(df)}** verbatims match "
+            f"({', '.join(subcorpus_words)}). The analysis will run on this subset only."
+        )
 
     # Placed via st.sidebar so it renders in the sidebar even though this
     # code runs in the main body — it needs df.columns, which isn't known
@@ -1051,8 +1157,43 @@ if uploaded_file:
 
         with st.spinner("Analysing text and building graph…"):
 
+            # ── Sub-corpus filter (optional) — applied FIRST, on the raw
+            #    text, before any tokenization/lemmatization. Everything
+            #    downstream (tokens, sentiment, graph, clustering, group
+            #    comparison, respondent drill-down) then only ever sees this
+            #    filtered subset. ─────────────────────────────────────────────
+            n_before_filter = len(df)
+            if subcorpus_words:
+                mask = build_subcorpus_mask(df[col].tolist(), subcorpus_words)
+                df = df.loc[mask].reset_index(drop=True)
+                if df.empty:
+                    st.warning(
+                        "No verbatims match your sub-corpus filter words — try different "
+                        "words/phrases, or clear the filter to use the full corpus."
+                    )
+                    st.stop()
+
+            # ── Spelling correction (optional) — corrects only the ANALYSIS
+            #    input, never the original verbatim column, so respondent
+            #    drill-down and exports always show exactly what people wrote.
+            analysis_col = col
+            spelling_corrections, spelling_corrected_occurrences = {}, 0
+            if use_spellcheck:
+                spellchecker = load_spellchecker(lang_info["code"])
+                if spellchecker is None:
+                    st.warning(f"Spelling correction isn't available for {lang_choice} — skipped.")
+                else:
+                    spelling_corrections, spelling_corrected_occurrences = build_spelling_corrections(
+                        df[col].tolist(), spellchecker
+                    )
+                    if spelling_corrections:
+                        df["_analysis_text"] = df[col].apply(
+                            lambda t: apply_spelling_corrections(t, spelling_corrections)
+                        )
+                        analysis_col = "_analysis_text"
+
             # Tokenise
-            df["tokens"] = df[col].apply(
+            df["tokens"] = df[analysis_col].apply(
                 lambda x: preprocess(x, lang_info["code"], lemmatizer_en, spacy_nlp, all_stops, stop_words)
             )
 
@@ -1069,7 +1210,7 @@ if uploaded_file:
             #    near-meaningless near-zero scores for other languages rather
             #    than erroring, which is worse than just not showing it. ─────
             if sentiment_analyzer is not None:
-                row_sentiments = compute_row_sentiment(df[col].tolist(), sentiment_analyzer)
+                row_sentiments = compute_row_sentiment(df[analysis_col].tolist(), sentiment_analyzer)
                 word_sent = compute_word_sentiment(df["tokens"].tolist(), row_sentiments)
             else:
                 word_sent = {}
@@ -1152,6 +1293,11 @@ if uploaded_file:
                 "target_n_clusters": n_clusters,
                 "cluster_match_diff": best_d,
                 "n_components": n_components,
+                "n_before_filter": n_before_filter,
+                "n_after_filter": len(df),
+                "subcorpus_words": list(subcorpus_words),
+                "spelling_corrections": spelling_corrections,
+                "spelling_corrected_occurrences": spelling_corrected_occurrences,
             }
             # New analysis → reset custom cluster colors to the default
             # palette (a prior custom pick may not even make sense if the
@@ -1178,6 +1324,11 @@ if "results" in st.session_state:
     target_n_clusters  = res.get("target_n_clusters")
     cluster_match_diff = res.get("cluster_match_diff", 0)
     n_components       = res.get("n_components")
+    n_before_filter    = res.get("n_before_filter")
+    n_after_filter     = res.get("n_after_filter")
+    subcorpus_words    = res.get("subcorpus_words") or []
+    spelling_corrections = res.get("spelling_corrections") or {}
+    spelling_corrected_occurrences = res.get("spelling_corrected_occurrences", 0)
 
     # ── Custom cluster colors ────────────────────────────────────────────────
     with st.expander("🎨 Cluster colors", expanded=False):
@@ -1204,6 +1355,25 @@ if "results" in st.session_state:
 
     # ── Cluster summary cards ───────────────────────────────────────────────
     st.markdown("### Cluster overview")
+    if spelling_corrections:
+        with st.expander(
+            f"✏️ Spelling correction applied — {len(spelling_corrections)} unique words changed "
+            f"({spelling_corrected_occurrences} occurrences). Click to review."
+        ):
+            st.caption(
+                "Only affects the analysis (tokenizing, clustering, sentiment) — the original "
+                "verbatim text is unchanged everywhere else (respondent drill-down, exports)."
+            )
+            correction_rows = sorted(spelling_corrections.items())
+            st.dataframe(
+                pd.DataFrame(correction_rows, columns=["Original", "Corrected"]),
+                use_container_width=True, height=min(300, 40 + 35 * len(correction_rows)),
+            )
+    if subcorpus_words:
+        st.caption(
+            f"🎯 Sub-corpus filter applied — analyzing **{n_after_filter} of {n_before_filter}** verbatims "
+            f"matching: {', '.join(subcorpus_words)}."
+        )
     if target_n_clusters and cluster_match_diff:
         if n_components and target_n_clusters < n_components:
             st.caption(
