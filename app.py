@@ -1166,7 +1166,13 @@ all_stops = set(
 st.title("🌐 Semantic Relationship Map")
 
 if uploaded_file:
-    df  = pd.read_excel(uploaded_file)
+    excel_file = pd.ExcelFile(uploaded_file)
+    sheet_names = excel_file.sheet_names
+    if len(sheet_names) > 1:
+        sheet_choice = st.selectbox("Sheet", sheet_names, index=0, key="sheet_choice")
+    else:
+        sheet_choice = sheet_names[0]
+    df  = excel_file.parse(sheet_name=sheet_choice)
     col = st.selectbox("Text column", df.columns)
 
     if subcorpus_words:
