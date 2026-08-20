@@ -1494,6 +1494,73 @@ if "results" in st.session_state:
     with tabs[0]:
         st.components.v1.html(html_map, height=750, scrolling=False)
 
+        # ── Top Words by Cluster ─────────────────────────────────────────────
+        st.markdown("### 🏆 Top Words by Cluster")
+        metric_label = "TF-IDF score" if using_tfidf else "Frequency"
+        st.caption(f"Ranked by **{metric_label}** — matches the 'Use TF-IDF weighting' setting in the sidebar.")
+
+        tw_col1, tw_col2 = st.columns([2, 1])
+        top_cluster_options = [f"Cluster {i+1}" for i in range(len(cluster_ids))]
+        top_cluster_choice = tw_col1.selectbox("Show top words for:", top_cluster_options, key="topwords_cluster")
+        top_n = tw_col2.slider("Top N words", 5, 50, 20, key="topwords_n")
+
+        tw_idx = int(top_cluster_choice.split(" ")[1]) - 1
+        tw_cid = cluster_ids[tw_idx]
+        tw_members = [w for w, c in best_p.items() if c == tw_cid]
+        tw_ranked = sorted(tw_members, key=lambda w: -size_map.get(w, word_freq.get(w, 0)))[:top_n]
+
+        if tw_ranked:
+            top_words_df = pd.DataFrame({
+                "Rank": range(1, len(tw_ranked) + 1),
+                "Word": [display_label(w) for w in tw_ranked],
+                metric_label: [round(size_map.get(w, word_freq.get(w, 0)), 3) for w in tw_ranked],
+            })
+
+            fig, ax = plt.subplots(figsize=(9, max(2, 0.32 * len(tw_ranked))))
+            ax.barh(
+                top_words_df["Word"][::-1], top_words_df[metric_label][::-1],
+                color=color_map.get(tw_cid, "#0085AF"),
+            )
+            ax.set_xlabel(metric_label)
+            ax.set_title(f"{top_cluster_choice} — top {len(tw_ranked)} words")
+            st.pyplot(fig)
+            plt.close(fig)
+
+            st.dataframe(
+                top_words_df, use_container_width=True, hide_index=True,
+                height=min(420, 40 + 35 * len(tw_ranked)),
+            )
+
+            # ── Export top words for EVERY cluster in one file ────────────────
+            all_top_rows = []
+            for i, cid in enumerate(cluster_ids):
+                c_members = [w for w, c in best_p.items() if c == cid]
+                c_ranked = sorted(c_members, key=lambda w: -size_map.get(w, word_freq.get(w, 0)))[:top_n]
+                for rank, w in enumerate(c_ranked, start=1):
+                    all_top_rows.append({
+                        "Cluster": f"Cluster {i+1}",
+                        "Rank": rank,
+                        "Word": display_label(w),
+                        metric_label: round(size_map.get(w, word_freq.get(w, 0)), 3),
+                    })
+            all_top_words_df = pd.DataFrame(all_top_rows)
+
+            top_words_xlsx_buf = io.BytesIO()
+            with pd.ExcelWriter(top_words_xlsx_buf, engine="openpyxl") as writer:
+                all_top_words_df.to_excel(writer, index=False, sheet_name="top_words_by_cluster")
+            st.download_button(
+                f"💾 Download top {top_n} words for all clusters (XLSX)",
+                data=top_words_xlsx_buf.getvalue(),
+                file_name=f"top_{top_n}_words_by_cluster.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="download_topwords_xlsx",
+            )
+        else:
+            st.info("No words in this cluster.")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
         if word_sent:
             st.markdown("### 😊 Sentiment by Cluster")
             st.caption("Average VADER sentiment of respondent rows mentioning each cluster's words (−1 = negative, +1 = positive).")
