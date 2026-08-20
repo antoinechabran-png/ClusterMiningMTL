@@ -16,10 +16,12 @@ import os
 import json
 import io
 import math
+import random
 import tempfile
 import community as community_louvain  # python-louvain
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
+import matplotlib
 
 # ─── Page config ────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Semantic Explorer", layout="wide")
@@ -167,20 +169,56 @@ def normalize_sizes(values_dict, out_min=12, out_max=42):
         return {k: mid for k in values_dict}
     return {k: out_min + (v - lo) / (hi - lo) * (out_max - out_min) for k, v in values_dict.items()}
 
-# Readable, dataviz-friendly fonts for the word cloud. Values are relative
-# paths this app expects to find under a local "fonts/" folder — TTF files
-# aren't bundled here (no network access to fetch them), so add the actual
-# font files to your project for each entry you want to offer; anything
-# missing falls back to the WordCloud default automatically.
+# Word-cloud fonts. The image is rendered SERVER-SIDE (matplotlib/PIL) — so
+# what matters is whether a .ttf file exists in the deployed app's own
+# filesystem, not anything installed on the person viewing it. The DejaVu/
+# STIX entries below point at font files that ship INSIDE the matplotlib
+# package itself, so they're guaranteed present with zero setup on any
+# platform. The others are popular modern webfonts, but need their .ttf
+# files manually added to a local "fonts/" folder in the project — labeled
+# accordingly so it's clear upfront which is which, rather than silently
+# falling back to Default when a file is missing.
+def _mpl_bundled_font(filename):
+    try:
+        path = os.path.join(matplotlib.get_data_path(), "fonts", "ttf", filename)
+        return path if os.path.exists(path) else None
+    except Exception:
+        return None
+
 FONT_OPTIONS = {
-    "Default": None,
-    "Inter":      "fonts/Inter-Regular.ttf",
-    "Open Sans":  "fonts/OpenSans-Regular.ttf",
-    "Roboto":     "fonts/Roboto-Regular.ttf",
-    "Lato":       "fonts/Lato-Regular.ttf",
-    "Montserrat": "fonts/Montserrat-Regular.ttf",
-    "Nunito":     "fonts/Nunito-Regular.ttf",
+    "Default (DejaVu Sans)": None,
+    "DejaVu Sans Bold":      _mpl_bundled_font("DejaVuSans-Bold.ttf"),
+    "DejaVu Serif":          _mpl_bundled_font("DejaVuSerif.ttf"),
+    "DejaVu Serif Bold":     _mpl_bundled_font("DejaVuSerif-Bold.ttf"),
+    "STIX General (serif)":  _mpl_bundled_font("STIXGeneral.ttf"),
+    "Inter — needs setup":      "fonts/Inter-Regular.ttf",
+    "Open Sans — needs setup":  "fonts/OpenSans-Regular.ttf",
+    "Roboto — needs setup":     "fonts/Roboto-Regular.ttf",
+    "Lato — needs setup":       "fonts/Lato-Regular.ttf",
+    "Montserrat — needs setup": "fonts/Montserrat-Regular.ttf",
+    "Nunito — needs setup":     "fonts/Nunito-Regular.ttf",
 }
+
+# Curated word-cloud color palettes, independent of cluster colors. Hand-
+# picked (not raw matplotlib colormaps) specifically to avoid low-contrast
+# near-white or pale colors that colormaps like "Blues"/"spring" can produce
+# at their light end — every color here reads clearly on a white background.
+WORDCLOUD_PALETTES = {
+    "Ocean":  ["#0B4F6C", "#01497C", "#014F86", "#2C7DA0", "#468FAF", "#61A5C2"],
+    "Sunset": ["#7A1E1E", "#B3261E", "#D64550", "#E8871E", "#C9184A", "#A4243B"],
+    "Forest": ["#1B4332", "#2D6A4F", "#40916C", "#386641", "#52796F", "#6A994E"],
+    "Berry":  ["#3C096C", "#5A189A", "#7B2CBF", "#560BAD", "#7209B7", "#9D4EDD"],
+    "Slate":  ["#0D1B2A", "#1B263B", "#2C3E50", "#34495E", "#3A506B", "#1C2541"],
+    "Vivid":  ["#E63946", "#F77F00", "#2A9D8F", "#264653", "#8338EC", "#3A86FF", "#606C38"],
+}
+
+def make_palette_color_func(colors, seed=42):
+    """Deterministic per-word color pick from a fixed palette — same
+    reproducibility spirit as the cluster color_func (fixed random_state)."""
+    rng = random.Random(seed)
+    def color_func(word, font_size, position, orientation, random_state=None, **kwargs):
+        return rng.choice(colors)
+    return color_func
 
 # ─── NLP ─────────────────────────────────────────────────────────────────────
 @st.cache_resource
@@ -1504,6 +1542,20 @@ if "results" in st.session_state:
         cloud_scope = wc_col1.selectbox("Show word cloud for:", cloud_options, key="cloud_scope")
         font_choice = wc_col2.selectbox("Font", list(FONT_OPTIONS.keys()), key="cloud_font")
 
+        wc_col3, wc_col4 = st.columns(2)
+        orientation_choice = wc_col3.selectbox(
+            "Word orientation",
+            ["Horizontal + Vertical (mixed)", "Horizontal only"],
+            key="cloud_orientation",
+        )
+        palette_choice = wc_col4.selectbox(
+            "Color palette",
+            ["Match cluster colors (default)"] + list(WORDCLOUD_PALETTES.keys()),
+            key="cloud_palette",
+            help="Palettes other than the default aren't tied to cluster colors — "
+                 "they're a separate, purely visual choice for this word cloud.",
+        )
+
         if cloud_scope == "Entire sample":
             cloud_freqs = {w: size_map.get(w, word_freq[w]) for w in word_freq}
             focus_cid = None
@@ -1525,16 +1577,22 @@ if "results" in st.session_state:
             display_freqs = {display_label(w): v for w, v in cloud_freqs.items()}
             disp_to_orig = {display_label(w): w for w in cloud_freqs}
 
+            prefer_horizontal = 1.0 if orientation_choice == "Horizontal only" else 0.9
+
             wc_kwargs = dict(
-                width=1100, height=550, background_color="white", prefer_horizontal=0.9,
+                width=1100, height=550, background_color="white",
+                prefer_horizontal=prefer_horizontal,
             )
             if font_path:
                 wc_kwargs["font_path"] = font_path
 
             wc = WordCloud(**wc_kwargs).generate_from_frequencies(display_freqs)
 
-            # ── Recolor to match cluster colors, consistent with the map/bubbles.
-            if focus_cid is None:
+            if palette_choice != "Match cluster colors (default)":
+                # A standalone palette, independent of cluster identity —
+                # same color set regardless of scope, as requested.
+                _color_func = make_palette_color_func(WORDCLOUD_PALETTES[palette_choice])
+            elif focus_cid is None:
                 # Entire sample: solid color per word's own cluster.
                 def _color_func(word, font_size, position, orientation, random_state=None, **kwargs):
                     orig = disp_to_orig.get(word, word)
