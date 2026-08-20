@@ -716,6 +716,38 @@ function filterCluster(cid) {{
 
 function normWord(s) {{ return s.replace(/_/g, " ").toLowerCase(); }}
 
+function isolateWord(nodeId) {{
+  // Fade everything except this node and whatever it's directly connected
+  // to — same fade/restore approach as filterCluster, just keyed on graph
+  // adjacency instead of cluster membership. This is what actually solves
+  // "the map is too crowded to see one word's connections": only that
+  // word's immediate neighborhood stays visible.
+  var neighbors = {{}};
+  neighbors[nodeId] = true;
+  network.body.data.edges.get().forEach(function(e) {{
+    if (e.from === nodeId) neighbors[e.to] = true;
+    if (e.to === nodeId) neighbors[e.from] = true;
+  }});
+
+  network.body.data.nodes.update(
+    Object.keys(NODE_META).map(function(id) {{
+      var m = ACTIVE_META[id];
+      if (neighbors[id]) {{
+        return {{ id:id, color:m.color, font:m.font, borderWidth: (id === nodeId ? 5 : 2) }};
+      }} else {{
+        return {{ id:id, color:FADE_NODE, font:FADE_FONT, borderWidth:2 }};
+      }}
+    }})
+  );
+
+  network.body.data.edges.update(
+    network.body.data.edges.get().map(function(e) {{
+      var keep = (e.from === nodeId || e.to === nodeId);
+      return {{ id:e.id, color:{{ color: keep ? "#7ab4c8" : DIM_EDGE, highlight:"#FF8000" }} }};
+    }})
+  );
+}}
+
 function searchWord() {{
   var msg = document.getElementById("searchMsg");
   var q = document.getElementById("searchBox").value.trim().toLowerCase();
@@ -733,16 +765,12 @@ function searchWord() {{
     return;
   }}
 
-  showAll();
+  isolateWord(match);
   network.selectNodes([match]);
   network.focus(match, {{
     scale: 1.5,
     animation: {{ duration: 700, easingFunction: "easeInOutQuad" }},
   }});
-  network.body.data.nodes.update([{{ id: match, borderWidth: 5 }}]);
-  setTimeout(function() {{
-    network.body.data.nodes.update([{{ id: match, borderWidth: 2 }}]);
-  }}, 1600);
 }}
 
 function exportPNG() {{
@@ -1758,6 +1786,22 @@ if "results" in st.session_state:
             mask = resp_df["tokens"].apply(lambda toks: pick_word in toks)
             matches = resp_df.loc[mask]
             st.write(f"**{len(matches)}** respondent(s) mention *{display_label(pick_word)}*")
+
+            if pick_word in G:
+                neighbors = sorted(G[pick_word].items(), key=lambda kv: -kv[1].get("weight", 1))
+                if neighbors:
+                    st.markdown(f"**Main connections for '{display_label(pick_word)}'** (from the interactive map)")
+                    conn_df = pd.DataFrame({
+                        "Connected word": [display_label(w) for w, _ in neighbors],
+                        "Link strength (co-occurrences)": [d.get("weight", 1) for _, d in neighbors],
+                    })
+                    st.dataframe(
+                        conn_df, use_container_width=True, hide_index=True,
+                        height=min(300, 40 + 35 * len(neighbors)),
+                    )
+                else:
+                    st.caption("This word has no connections above the current 'Min connection strength' threshold.")
+
             show_cols = [text_col] + ([group_col] if group_col else [])
             st.dataframe(matches[show_cols], use_container_width=True, height=300)
             if len(matches):
