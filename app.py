@@ -1123,6 +1123,54 @@ with st.sidebar:
     if lang_choice != "English":
         st.caption("ℹ️ Sentiment analysis is English-only and is disabled for this language.")
     uploaded_file = st.file_uploader("📂 Upload Excel corpus", type=["xlsx"])
+
+    sheet_choice = None
+    df = None
+    subtarget_col_choice = "None"
+    subtarget_values = []
+
+    if uploaded_file:
+        excel_file = pd.ExcelFile(uploaded_file)
+        sheet_names = excel_file.sheet_names
+        if len(sheet_names) > 1:
+            sheet_choice = st.selectbox("Sheet", sheet_names, index=0, key="sheet_choice")
+        else:
+            sheet_choice = sheet_names[0]
+        df = excel_file.parse(sheet_name=sheet_choice)
+
+        st.markdown("---")
+        st.caption("🎯 Sub-target filter (optional)")
+        subtarget_col_choice = st.selectbox(
+            "Restrict the analysis to a sub-target:",
+            ["None"] + list(df.columns),
+            key="subtarget_col_choice",
+            help="Restricts the ENTIRE analysis to only the rows matching the "
+                 "value(s) you pick below — e.g. choose a 'Generation' column and "
+                 "'Millennials' to analyze only that segment, nothing else. This is "
+                 "different from 'Compare groups by' further down: that one keeps "
+                 "the full corpus and compares segments side by side, rather than "
+                 "throwing the rest away.",
+        )
+        if subtarget_col_choice != "None":
+            value_counts = df[subtarget_col_choice].astype(str).value_counts()
+            value_options = value_counts.index.tolist()
+            subtarget_values = st.multiselect(
+                "Value(s) to keep:",
+                value_options,
+                default=value_options[:1],
+                key="subtarget_values",
+                format_func=lambda v: f"{v} ({value_counts.get(v, 0)})",
+            )
+            if subtarget_values:
+                n_before_subtarget = len(df)
+                df = df[df[subtarget_col_choice].astype(str).isin(subtarget_values)].reset_index(drop=True)
+                st.caption(
+                    f"🎯 Sub-target active — **{len(df)} of {n_before_subtarget}** rows kept "
+                    f"({subtarget_col_choice}: {', '.join(subtarget_values)})."
+                )
+            else:
+                st.caption("⚠️ No value selected — pick at least one, or the whole corpus is used.")
+
     st.markdown("---")
     min_freq   = st.slider("Min word occurrences",         1, 50,  5)
     min_edge   = st.slider(
@@ -1193,14 +1241,7 @@ all_stops = set(
 # ─── Main ────────────────────────────────────────────────────────────────────
 st.title("🌐 Semantic Relationship Map")
 
-if uploaded_file:
-    excel_file = pd.ExcelFile(uploaded_file)
-    sheet_names = excel_file.sheet_names
-    if len(sheet_names) > 1:
-        sheet_choice = st.selectbox("Sheet", sheet_names, index=0, key="sheet_choice")
-    else:
-        sheet_choice = sheet_names[0]
-    df  = excel_file.parse(sheet_name=sheet_choice)
+if uploaded_file and df is not None:
     col = st.selectbox("Text column", df.columns)
 
     if subcorpus_words:
@@ -1368,6 +1409,8 @@ if uploaded_file:
                 "n_before_filter": n_before_filter,
                 "n_after_filter": len(df),
                 "subcorpus_words": list(subcorpus_words),
+                "subtarget_col": subtarget_col_choice if subtarget_col_choice != "None" else None,
+                "subtarget_values": list(subtarget_values),
                 "spelling_corrections": spelling_corrections,
                 "spelling_corrected_occurrences": spelling_corrected_occurrences,
             }
@@ -1399,6 +1442,8 @@ if "results" in st.session_state:
     n_before_filter    = res.get("n_before_filter")
     n_after_filter     = res.get("n_after_filter")
     subcorpus_words    = res.get("subcorpus_words") or []
+    subtarget_col      = res.get("subtarget_col")
+    subtarget_values   = res.get("subtarget_values") or []
     spelling_corrections = res.get("spelling_corrections") or {}
     spelling_corrected_occurrences = res.get("spelling_corrected_occurrences", 0)
 
@@ -1441,6 +1486,8 @@ if "results" in st.session_state:
                 pd.DataFrame(correction_rows, columns=["Original", "Corrected"]),
                 use_container_width=True, height=min(300, 40 + 35 * len(correction_rows)),
             )
+    if subtarget_col:
+        st.caption(f"🎯 Sub-target active — analysis restricted to **{subtarget_col}: {', '.join(subtarget_values)}**.")
     if subcorpus_words:
         st.caption(
             f"🎯 Sub-corpus filter applied — analyzing **{n_after_filter} of {n_before_filter}** verbatims "
