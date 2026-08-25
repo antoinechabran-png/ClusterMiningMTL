@@ -18,11 +18,20 @@ pyspellchecker>=0.7,<0.8
 
 # Verbatim lemmatization for all 6 supported languages (English included —
 # NLTK's WordNet lemmatizer above is kept only as English's fallback if
-# en_core_web_sm fails to install).
-spacy>=3.7,<3.8
-en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.0/en_core_web_sm-3.7.0-py3-none-any.whl
-fr_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/fr_core_news_sm-3.7.0/fr_core_news_sm-3.7.0-py3-none-any.whl
-es_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.7.0/es_core_news_sm-3.7.0-py3-none-any.whl
-it_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/it_core_news_sm-3.7.0/it_core_news_sm-3.7.0-py3-none-any.whl
-de_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/de_core_news_sm-3.7.0/de_core_news_sm-3.7.0-py3-none-any.whl
-pt_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/pt_core_news_sm-3.7.0/pt_core_news_sm-3.7.0-py3-none-any.whl
+# en_core_web_sm fails to load).
+#
+# spacy>=3.8 specifically (not 3.7.x): 3.7.x's backend (thinc 8.2.x / blis
+# 0.7.x) was compiled before NumPy 2.0 existed and breaks at runtime against
+# a NumPy 2.x install with "numpy.dtype size changed... binary
+# incompatibility" — not an install-time failure, so it doesn't show up
+# until the model actually tries to load. 3.8's backend was built with
+# proper NumPy 2.x ABI support.
+#
+# Language models are NOT pinned here as wheel URLs — a pinned URL has to
+# exactly match whatever spaCy version pip/uv resolves (each model wheel's
+# own metadata restricts it to one spaCy minor version), which silently
+# breaks the moment that resolution drifts, exactly as happened above. They're
+# downloaded at runtime instead via spaCy's own downloader (see
+# load_spacy_model in the app), which always fetches a version actually
+# compatible with whatever spaCy is installed.
+spacy>=3.8,<3.9
