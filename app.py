@@ -241,24 +241,16 @@ def load_spacy_model(model_name):
     error, ABI/version mismatch, etc.), with error holding the actual
     exception text, so the real cause is visible instead of guessed at.
 
-    If the model isn't found locally, downloads it via spaCy's own
-    downloader (spacy.cli.download) rather than relying on a pinned wheel
-    URL in requirements.txt — a pinned URL has to exactly match whatever
-    spaCy version pip/uv actually resolved, which breaks silently whenever
-    that resolution drifts. spaCy's downloader always fetches a model
-    version compatible with the spaCy actually installed. This does mean
-    the first use of each language may take a few extra seconds while it
-    downloads (cached after that, for the life of the running app)."""
+    Does NOT attempt to download the model at runtime: Streamlit Cloud's
+    running app process doesn't have write permission to the environment's
+    site-packages (confirmed by a 'Permission denied' error installing
+    en_core_web_sm from inside the app) — only the deploy-time install step
+    can add packages. Models must be installed via requirements.txt."""
     if model_name is None:
         return None, None
     try:
         import spacy
-        try:
-            return spacy.load(model_name, disable=["parser", "ner"]), None
-        except OSError:
-            from spacy.cli import download as spacy_download
-            spacy_download(model_name)
-            return spacy.load(model_name, disable=["parser", "ner"]), None
+        return spacy.load(model_name, disable=["parser", "ner"]), None
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
 
