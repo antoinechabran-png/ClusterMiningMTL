@@ -16,11 +16,11 @@ scikit-learn>=1.3
 # warning, not a crash) if a language's dictionary isn't available.
 pyspellchecker>=0.7,<0.8
 
-# Multi-language verbatim support (French, Spanish, Italian, German, Portuguese).
-# English lemmatization still uses NLTK's WordNet lemmatizer above and does
-# NOT need spaCy — these five models are only loaded when a non-English
-# language is selected in the app.
+# Verbatim lemmatization for all 6 supported languages (English included —
+# NLTK's WordNet lemmatizer above is kept only as English's fallback if
+# en_core_web_sm fails to install).
 spacy>=3.7,<3.8
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.0/en_core_web_sm-3.7.0-py3-none-any.whl
 fr_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/fr_core_news_sm-3.7.0/fr_core_news_sm-3.7.0-py3-none-any.whl
 es_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.7.0/es_core_news_sm-3.7.0-py3-none-any.whl
 it_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/it_core_news_sm-3.7.0/it_core_news_sm-3.7.0-py3-none-any.whl
