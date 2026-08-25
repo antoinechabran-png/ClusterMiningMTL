@@ -27,11 +27,15 @@ pyspellchecker>=0.7,<0.8
 # until the model actually tries to load. 3.8's backend was built with
 # proper NumPy 2.x ABI support.
 #
-# Language models are NOT pinned here as wheel URLs — a pinned URL has to
-# exactly match whatever spaCy version pip/uv resolves (each model wheel's
-# own metadata restricts it to one spaCy minor version), which silently
-# breaks the moment that resolution drifts, exactly as happened above. They're
-# downloaded at runtime instead via spaCy's own downloader (see
-# load_spacy_model in the app), which always fetches a version actually
-# compatible with whatever spaCy is installed.
+# Models ARE pinned here as wheel URLs (tagged 3.8.0, to match spacy>=3.8) —
+# NOT downloaded at runtime. Streamlit Cloud's running app process doesn't
+# have write permission to the environment's site-packages (confirmed by a
+# 'Permission denied' error attempting exactly that), so install-time is the
+# only point models can actually be added.
 spacy>=3.8,<3.9
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+fr_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/fr_core_news_sm-3.8.0/fr_core_news_sm-3.8.0-py3-none-any.whl
+es_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.8.0/es_core_news_sm-3.8.0-py3-none-any.whl
+it_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/it_core_news_sm-3.8.0/it_core_news_sm-3.8.0-py3-none-any.whl
+de_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/de_core_news_sm-3.8.0/de_core_news_sm-3.8.0-py3-none-any.whl
+pt_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/pt_core_news_sm-3.8.0/pt_core_news_sm-3.8.0-py3-none-any.whl
