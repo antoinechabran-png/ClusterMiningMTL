@@ -33,13 +33,15 @@ nltk.download("omw-1.4",  quiet=True)
 nltk.download("vader_lexicon", quiet=True)
 
 # ─── Constants ──────────────────────────────────────────────────────────────
-# Verbatim language support. English uses the existing, well-tested NLTK
-# WordNet lemmatizer. The other five use spaCy's per-language models for
-# real dictionary-form lemmatization (chosen over NLTK's Snowball stemmers
-# for quality — at the cost of an extra dependency + a model download per
-# language; see requirements.txt).
+# Verbatim language support. All six languages lemmatize via spaCy's
+# per-language models — full, POS-aware lemmatization (knows whether a word
+# is a noun/verb/adjective before reducing it, so "running" correctly becomes
+# "run" and "better" becomes "good", not just plural nouns like "boxes" →
+# "box"). NLTK's WordNet lemmatizer is kept ONLY as English's fallback if
+# en_core_web_sm isn't installed — it's noun-only (no POS awareness), so it's
+# strictly worse than spaCy, but still better than no lemmatization at all.
 LANGUAGES = {
-    "English":    {"code": "en", "nltk_stop": "english",    "spacy_model": None},
+    "English":    {"code": "en", "nltk_stop": "english",    "spacy_model": "en_core_web_sm"},
     "French":     {"code": "fr", "nltk_stop": "french",     "spacy_model": "fr_core_news_sm"},
     "Spanish":    {"code": "es", "nltk_stop": "spanish",    "spacy_model": "es_core_news_sm"},
     "Italian":    {"code": "it", "nltk_stop": "italian",    "spacy_model": "it_core_news_sm"},
@@ -269,19 +271,22 @@ def preprocess(text, lang_code, lemmatizer_en, spacy_nlp, custom_stops, stop_wor
         neg_pattern = r"\b(" + "|".join(re.escape(w) for w in neg_words) + r")\s+(\w+)"
         text = re.sub(neg_pattern, r"not_\2", text, flags=re.UNICODE)
 
-    if lang_code == "en":
-        tokens = WORD_PATTERN.findall(text)
-        lemmas = [lemmatizer_en.lemmatize(t) for t in tokens]
-    elif spacy_nlp is not None:
+    if spacy_nlp is not None:
         # Feed spaCy the raw text directly rather than our own pre-tokenized
         # words — its tokenizer already understands each language's
         # contractions/clitics far better than a generic regex would.
         doc = spacy_nlp(text)
         lemmas = [tok.lemma_.lower() for tok in doc if tok.is_alpha]
+    elif lang_code == "en":
+        # English fallback if en_core_web_sm isn't installed: NLTK's
+        # WordNet lemmatizer. Noun-only (no POS awareness — "running" won't
+        # become "run"), but still better than no lemmatization at all.
+        tokens = WORD_PATTERN.findall(text)
+        lemmas = [lemmatizer_en.lemmatize(t) for t in tokens]
     else:
-        # No spaCy model installed for this language — fall back to plain
-        # tokenization with no real lemmatization (plurals/verb forms won't
-        # be reduced to a shared dictionary form).
+        # No spaCy model installed and no fallback lemmatizer for this
+        # language — plain tokenization with no real lemmatization (plurals/
+        # verb forms won't be reduced to a shared dictionary form).
         lemmas = WORD_PATTERN.findall(text)
 
     # Lemmatize/tokenize FIRST, then filter — the exclusion list should match
@@ -1116,9 +1121,15 @@ with st.sidebar:
     lang_choice = st.selectbox("🌍 Verbatim language", list(LANGUAGES.keys()), index=0, key="lang_choice")
     lang_info = LANGUAGES[lang_choice]
     if lang_info["spacy_model"] and load_spacy_model(lang_info["spacy_model"]) is None:
+        fallback_note = (
+            "falling back to NLTK's noun-only lemmatizer — decent, but it won't reduce "
+            "verb or adjective forms (e.g. 'running' stays 'running' instead of becoming 'run')"
+            if lang_choice == "English"
+            else "falling back to basic tokenization with no real lemmatization"
+        )
         st.caption(
-            f"⚠️ spaCy model **{lang_info['spacy_model']}** isn't installed — {lang_choice} will fall back "
-            "to basic tokenization without proper lemmatization until it's added (see requirements.txt)."
+            f"⚠️ spaCy model **{lang_info['spacy_model']}** isn't installed — {lang_choice} is {fallback_note} "
+            "until it's added (see requirements.txt)."
         )
     if lang_choice != "English":
         st.caption("ℹ️ Sentiment analysis is English-only and is disabled for this language.")
