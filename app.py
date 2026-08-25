@@ -236,17 +236,20 @@ def load_sentiment_analyzer():
 
 @st.cache_resource
 def load_spacy_model(model_name):
-    """Loads a spaCy language model for lemmatization. Returns None (rather
-    than raising) if the model isn't installed, so the app can fall back to
-    basic tokenization instead of crashing — the caller is responsible for
-    surfacing that as a warning."""
+    """Loads a spaCy language model for lemmatization. Returns (model, error)
+    — model is None if loading failed for ANY reason (not installed, import
+    error, ABI/version mismatch, etc.), with error holding the actual
+    exception text. Swallowing the exception without keeping this around
+    previously meant every failure looked like 'not installed' in the UI even
+    when the package was confirmed present in the deploy log — this way the
+    real cause is visible instead of guessed at."""
     if model_name is None:
-        return None
+        return None, None
     try:
         import spacy
-        return spacy.load(model_name, disable=["parser", "ner"])
-    except Exception:
-        return None
+        return spacy.load(model_name, disable=["parser", "ner"]), None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
 
 @st.cache_resource
 def load_stopwords(nltk_lang):
@@ -1120,7 +1123,8 @@ with st.sidebar:
     st.title("⚙️ Settings")
     lang_choice = st.selectbox("🌍 Verbatim language", list(LANGUAGES.keys()), index=0, key="lang_choice")
     lang_info = LANGUAGES[lang_choice]
-    if lang_info["spacy_model"] and load_spacy_model(lang_info["spacy_model"]) is None:
+    _spacy_model_check, _spacy_error = load_spacy_model(lang_info["spacy_model"])
+    if lang_info["spacy_model"] and _spacy_model_check is None:
         fallback_note = (
             "falling back to NLTK's noun-only lemmatizer — decent, but it won't reduce "
             "verb or adjective forms (e.g. 'running' stays 'running' instead of becoming 'run')"
@@ -1128,11 +1132,14 @@ with st.sidebar:
             else "falling back to basic tokenization with no real lemmatization"
         )
         st.caption(
-            f"⚠️ spaCy model **{lang_info['spacy_model']}** isn't installed — {lang_choice} is {fallback_note} "
-            "until it's added (see requirements.txt)."
+            f"⚠️ spaCy model **{lang_info['spacy_model']}** failed to load — {lang_choice} is {fallback_note} "
+            "until it's fixed."
         )
+        if _spacy_error:
+            st.caption(f"Technical detail: `{_spacy_error}`")
     if lang_choice != "English":
         st.caption("ℹ️ Sentiment analysis is English-only and is disabled for this language.")
+        st.caption("ℹ️ Spelling correction is English-only and is disabled for this language (testing showed the non-English dictionaries producing wrong-language corrections).")
     uploaded_file = st.file_uploader("📂 Upload Excel corpus", type=["xlsx"])
 
     sheet_choice = None
@@ -1214,15 +1221,19 @@ with st.sidebar:
              "instead of by raw occurrence count.",
     )
     use_spellcheck = st.checkbox(
-        "✏️ Correct spelling before analysis (beta)", value=False, key="use_spellcheck",
-        help="Fixes likely typos using a general-purpose dictionary before tokenizing "
-             "— only single-character-edit fixes (conservative), e.g. 'frehs' → "
-             "'fresh'. Only affects the analysis (tokens, clustering, sentiment); the "
-             "original verbatim text is never changed in exports or respondent "
-             "drill-down. It can occasionally 'correct' a legitimate niche or "
-             "brand-specific word it doesn't recognize — a full list of every change "
-             "made appears after you generate the map, so you can review it. Not "
-             "guaranteed to be available for every verbatim language.",
+        "✏️ Correct spelling before analysis (beta, English only)", value=False, key="use_spellcheck",
+        disabled=(lang_info["code"] != "en"),
+        help="Fixes likely typos using a general-purpose English dictionary before "
+             "tokenizing — only single-character-edit fixes (conservative), e.g. "
+             "'frehs' → 'fresh'. Only affects the analysis (tokens, clustering, "
+             "sentiment); the original verbatim text is never changed in exports or "
+             "respondent drill-down. It can occasionally 'correct' a legitimate niche "
+             "or brand-specific word it doesn't recognize — a full list of every "
+             "change made appears after you generate the map, so you can review it. "
+             "English only: testing on other languages showed words getting "
+             "'corrected' into English instead of staying in their own language "
+             "(e.g. French 'abricot' → 'apricot'), so it's disabled elsewhere until "
+             "that's fixed.",
     )
     st.markdown("---")
     st.caption("ℹ️ After adding words here, click **Generate map** again to regenerate the analysis for newly excluded words.")
@@ -1275,7 +1286,7 @@ if uploaded_file and df is not None:
 
     if st.button("🚀 Generate map", use_container_width=True):
         lemmatizer_en = load_lemmatizer()
-        spacy_nlp = load_spacy_model(lang_info["spacy_model"])
+        spacy_nlp, _ = load_spacy_model(lang_info["spacy_model"])
         stop_words = load_stopwords(lang_info["nltk_stop"])
         sentiment_analyzer = load_sentiment_analyzer() if lang_info["code"] == "en" else None
 
@@ -1297,15 +1308,16 @@ if uploaded_file and df is not None:
                     )
                     st.stop()
 
-            # ── Spelling correction (optional) — corrects only the ANALYSIS
-            #    input, never the original verbatim column, so respondent
-            #    drill-down and exports always show exactly what people wrote.
+            # ── Spelling correction (optional, English only — see checkbox
+            #    help text for why) — corrects only the ANALYSIS input, never
+            #    the original verbatim column, so respondent drill-down and
+            #    exports always show exactly what people wrote.
             analysis_col = col
             spelling_corrections, spelling_corrected_occurrences = {}, 0
-            if use_spellcheck:
+            if use_spellcheck and lang_info["code"] == "en":
                 spellchecker = load_spellchecker(lang_info["code"])
                 if spellchecker is None:
-                    st.warning(f"Spelling correction isn't available for {lang_choice} — skipped.")
+                    st.warning("Spelling correction isn't available right now — skipped.")
                 else:
                     spelling_corrections, spelling_corrected_occurrences = build_spelling_corrections(
                         df[col].tolist(), spellchecker
