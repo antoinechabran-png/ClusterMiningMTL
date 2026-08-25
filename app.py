@@ -239,15 +239,26 @@ def load_spacy_model(model_name):
     """Loads a spaCy language model for lemmatization. Returns (model, error)
     — model is None if loading failed for ANY reason (not installed, import
     error, ABI/version mismatch, etc.), with error holding the actual
-    exception text. Swallowing the exception without keeping this around
-    previously meant every failure looked like 'not installed' in the UI even
-    when the package was confirmed present in the deploy log — this way the
-    real cause is visible instead of guessed at."""
+    exception text, so the real cause is visible instead of guessed at.
+
+    If the model isn't found locally, downloads it via spaCy's own
+    downloader (spacy.cli.download) rather than relying on a pinned wheel
+    URL in requirements.txt — a pinned URL has to exactly match whatever
+    spaCy version pip/uv actually resolved, which breaks silently whenever
+    that resolution drifts. spaCy's downloader always fetches a model
+    version compatible with the spaCy actually installed. This does mean
+    the first use of each language may take a few extra seconds while it
+    downloads (cached after that, for the life of the running app)."""
     if model_name is None:
         return None, None
     try:
         import spacy
-        return spacy.load(model_name, disable=["parser", "ner"]), None
+        try:
+            return spacy.load(model_name, disable=["parser", "ner"]), None
+        except OSError:
+            from spacy.cli import download as spacy_download
+            spacy_download(model_name)
+            return spacy.load(model_name, disable=["parser", "ner"]), None
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
 
