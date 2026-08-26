@@ -32,13 +32,21 @@ pyspellchecker>=0.7,<0.8
 # have write permission to the environment's site-packages (confirmed by a
 # 'Permission denied' error attempting exactly that), so install-time is the
 # only point models can actually be added.
-spacy>=3.8,<3.9
+#
+# spacy[ja] (not plain spacy): Japanese's tokenizer needs SudachiPy for word
+# segmentation — spaCy doesn't bundle it by default, it's an optional extra.
+# Note: spaCy's own docs flag SudachiPy as having a history of version
+# sensitivity ("if you run into errors related to sudachipy... downgrade to
+# sudachipy==0.4.9"); unverified from this sandbox whether that's still
+# relevant — worth watching the deploy log specifically for this one.
+spacy[ja]>=3.8,<3.9
 en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 fr_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/fr_core_news_sm-3.8.0/fr_core_news_sm-3.8.0-py3-none-any.whl
 es_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.8.0/es_core_news_sm-3.8.0-py3-none-any.whl
 it_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/it_core_news_sm-3.8.0/it_core_news_sm-3.8.0-py3-none-any.whl
 de_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/de_core_news_sm-3.8.0/de_core_news_sm-3.8.0-py3-none-any.whl
 pt_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/pt_core_news_sm-3.8.0/pt_core_news_sm-3.8.0-py3-none-any.whl
+ja_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/ja_core_news_sm-3.8.0/ja_core_news_sm-3.8.0-py3-none-any.whl
 
 # Chinese word segmentation — pure Python, bundled dictionary, no compiled
 # extensions. Used instead of spaCy's official Chinese pipeline (which
