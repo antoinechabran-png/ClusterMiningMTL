@@ -39,3 +39,10 @@ es_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/es
 it_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/it_core_news_sm-3.8.0/it_core_news_sm-3.8.0-py3-none-any.whl
 de_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/de_core_news_sm-3.8.0/de_core_news_sm-3.8.0-py3-none-any.whl
 pt_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/pt_core_news_sm-3.8.0/pt_core_news_sm-3.8.0-py3-none-any.whl
+
+# Chinese word segmentation — pure Python, bundled dictionary, no compiled
+# extensions. Used instead of spaCy's official Chinese pipeline (which
+# typically requires pkuseg, a compiled dependency with a real history of
+# install problems — exactly the risk category the pins above exist to
+# avoid).
+jieba>=0.42,<0.43
