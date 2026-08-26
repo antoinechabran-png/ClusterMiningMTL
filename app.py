@@ -235,6 +235,61 @@ FONT_OPTIONS = {
     "Nunito — needs setup":     "fonts/Nunito-Regular.ttf",
 }
 
+# ─── CJK font support (Chinese) ────────────────────────────────────────────────
+# None of the fonts above contain any Chinese/Japanese/Korean glyphs at
+# all — matplotlib's bundled DejaVu/STIX fonts are Latin/Greek/Cyrillic
+# only, and WordCloud's own built-in default font is the same story. Without
+# a CJK-capable font, every Chinese character renders as an empty box (a
+# "missing glyph" placeholder — not a bug in our code, just what any text
+# renderer does when the font it's using doesn't contain that character).
+# This affects every matplotlib chart the app draws, not only the word
+# cloud image, since matplotlib's default font is the same DejaVu Sans.
+#
+# Fix: install a CJK font at the SYSTEM level via packages.txt (Streamlit
+# Cloud's apt-get mechanism — see packages.txt) rather than trying to bundle
+# a font file in the repo. Below just searches the common install paths for
+# it and registers it with matplotlib if found.
+_CJK_FONT_CANDIDATES = [
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+    "/usr/share/fonts/truetype/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+]
+
+def find_cjk_font_path():
+    for c in _CJK_FONT_CANDIDATES:
+        if os.path.exists(c):
+            return c
+    return None
+
+FONT_OPTIONS["Chinese / CJK (Noto Sans) — needs packages.txt"] = find_cjk_font_path() or _CJK_FONT_CANDIDATES[0]
+
+@st.cache_resource
+def configure_cjk_matplotlib_font():
+    """Registers a CJK font with matplotlib (if one is actually installed on
+    the system) so Chinese text renders correctly in every chart the app
+    draws — Sentiment by Cluster, Top Words by Cluster, Diff View, axis
+    labels, titles — not just the word cloud image, which is a separate
+    rendering path (WordCloud/PIL) handled by font_path directly. Returns
+    the registered font's family name, or None if no CJK font was found."""
+    import matplotlib.font_manager as fm
+    path = find_cjk_font_path()
+    if path is None:
+        return None
+    try:
+        fm.fontManager.addfont(path)
+        font_name = fm.FontProperties(fname=path).get_name()
+        plt.rcParams["font.sans-serif"] = [font_name] + list(plt.rcParams.get("font.sans-serif", []))
+        # Many CJK fonts lack a proper Unicode minus glyph — without this,
+        # negative axis tick labels (e.g. the -1..+1 sentiment scale) would
+        # show the same empty-box problem this whole function exists to fix.
+        plt.rcParams["axes.unicode_minus"] = False
+        return font_name
+    except Exception:
+        return None
+
 # Curated word-cloud color palettes, independent of cluster colors. Hand-
 # picked (not raw matplotlib colormaps) specifically to avoid low-contrast
 # near-white or pale colors that colormaps like "Blues"/"spring" can produce
@@ -1549,6 +1604,7 @@ if uploaded_file and df is not None:
                 "resp_df": resp_df,
                 "text_col": col,
                 "using_tfidf": use_tfidf,
+                "lang_code": lang_info["code"],
                 "target_n_clusters": n_clusters,
                 "cluster_match_diff": best_d,
                 "n_components": n_components,
@@ -1582,6 +1638,14 @@ if "results" in st.session_state:
     resp_df      = res.get("resp_df")
     text_col     = res.get("text_col")
     using_tfidf  = res.get("using_tfidf", False)
+    lang_code    = res.get("lang_code")
+    if lang_code == "zh":
+        _cjk_font_name = configure_cjk_matplotlib_font()
+        if _cjk_font_name is None:
+            st.caption(
+                "⚠️ No CJK font found on this system — Chinese characters will render as empty "
+                "boxes in charts until a CJK font is installed (see packages.txt)."
+            )
     target_n_clusters  = res.get("target_n_clusters")
     cluster_match_diff = res.get("cluster_match_diff", 0)
     n_components       = res.get("n_components")
@@ -1831,10 +1895,17 @@ if "results" in st.session_state:
 
     # ── Tab 3: Word Cloud ────────────────────────────────────────────────────
     with tabs[2]:
+        if lang_code == "zh":
+            st.caption(
+                "🈳 Chinese verbatims need a CJK-capable font to render — if you see empty boxes "
+                "instead of characters, make sure **'Chinese / CJK (Noto Sans)'** is selected below."
+            )
         wc_col1, wc_col2 = st.columns([2, 1])
         cloud_options = ["Entire sample"] + [f"Cluster {i+1}" for i in range(len(cluster_ids))]
         cloud_scope = wc_col1.selectbox("Show word cloud for:", cloud_options, key="cloud_scope")
-        font_choice = wc_col2.selectbox("Font", list(FONT_OPTIONS.keys()), key="cloud_font")
+        font_names = list(FONT_OPTIONS.keys())
+        default_font_idx = font_names.index("Chinese / CJK (Noto Sans) — needs packages.txt") if lang_code == "zh" else 0
+        font_choice = wc_col2.selectbox("Font", font_names, index=default_font_idx, key="cloud_font")
 
         wc_col3, wc_col4 = st.columns(2)
         orientation_choice = wc_col3.selectbox(
