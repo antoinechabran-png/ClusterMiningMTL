@@ -47,6 +47,18 @@ LANGUAGES = {
     "Italian":    {"code": "it", "nltk_stop": "italian",    "spacy_model": "it_core_news_sm"},
     "German":     {"code": "de", "nltk_stop": "german",     "spacy_model": "de_core_news_sm"},
     "Portuguese": {"code": "pt", "nltk_stop": "portuguese", "spacy_model": "pt_core_news_sm"},
+    # Chinese doesn't use spaces between words, so it can't go through the
+    # regex/spaCy path the other six use — it's handled as a special case in
+    # preprocess() via jieba (word segmentation). spacy_model is None on
+    # purpose: spaCy's official Chinese pipeline typically requires pkuseg, a
+    # compiled dependency with a real history of install problems — jieba is
+    # pure Python and much lower-risk. nltk_stop is None because NLTK has no
+    # Chinese stopword corpus; DEFAULT_EXCLUSIONS_BY_LANG["Chinese"] below
+    # carries a larger hand-picked list to compensate. Chinese also doesn't
+    # meaningfully inflect the way European languages do (no verb
+    # conjugation, no plural noun forms), so segmentation alone is close to
+    # a lemma already — no separate lemmatization step is needed.
+    "Chinese":    {"code": "zh", "nltk_stop": None,         "spacy_model": None},
 }
 
 # Best-effort negation markers per language. NOTE: this is a simple "tag the
@@ -62,6 +74,13 @@ NEGATION_WORDS = {
     "it": ["non", "mai", "nessuno", "nessuna", "niente"],
     "de": ["nicht", "kein", "keine", "nie", "niemals", "nichts"],
     "pt": ["não", "nunca", "jamais", "nenhum", "nenhuma", "tampouco"],
+    # Applied differently for Chinese — see preprocess(): tagged against the
+    # SEGMENTED token list (post-jieba), not via whitespace regex on raw
+    # text, since there's no whitespace to match. Directionally these behave
+    # more like English than French/German: 不/没 typically sit directly
+    # before what they negate, so the "tag the next token" heuristic fits
+    # reasonably well here.
+    "zh": ["不", "没", "没有", "别", "无", "非"],
 }
 
 # Default exclusion words, translated per language (best-effort — editable
@@ -96,6 +115,21 @@ DEFAULT_EXCLUSIONS_BY_LANG = {
         "produto", "cheirar", "sentir", "realmente", "apenas", "como",
         "pouco", "pensar", "muito", "fazer", "também", "bastante",
         "algo", "parecer", "evocar", "encontrar", "lembrar",
+    ],
+    # Larger than the others on purpose: NLTK has no Chinese stopword corpus
+    # at all, so this list also has to cover common grammatical function
+    # words (的/了/是/在 etc.), not just filler content words the way the
+    # other languages' lists do.
+    "Chinese": [
+        "产品", "闻起来", "感觉", "真的", "只是", "喜欢", "好像", "一点",
+        "认为", "觉得", "很多", "也是", "相当", "什么", "似乎", "引起",
+        "唤起", "找到", "提醒", "的", "了", "和", "是", "在", "我", "你",
+        "他", "她", "它", "们", "这", "那", "有", "也", "都", "就", "还",
+        "而", "或", "与", "及", "着", "吗", "呢", "啊", "吧", "把", "被",
+        "让", "给", "从", "到", "对", "于", "上", "下", "中", "后", "前",
+        "里", "外", "个", "些", "怎么", "为什么", "因为", "所以", "但是",
+        "可是", "如果", "虽然", "一个", "一些", "这个", "那个", "可以",
+        "应该", "会", "要", "能",
     ],
 }
 
@@ -255,7 +289,23 @@ def load_spacy_model(model_name):
         return None, f"{type(e).__name__}: {e}"
 
 @st.cache_resource
+def load_jieba():
+    """Chinese word segmenter. Pure Python, bundled dictionary, no compiled
+    extensions — deliberately chosen over spaCy's official Chinese pipeline,
+    which typically requires pkuseg (a compiled dependency with a real
+    history of install problems, exactly the risk category recent deploys
+    have been fighting). Returns (module, error), same pattern as
+    load_spacy_model, so a failure degrades gracefully instead of crashing."""
+    try:
+        import jieba
+        return jieba, None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+@st.cache_resource
 def load_stopwords(nltk_lang):
+    if nltk_lang is None:
+        return set()
     try:
         return set(stopwords.words(nltk_lang))
     except Exception:
@@ -267,54 +317,113 @@ def load_stopwords(nltk_lang):
 # silently stripped out or split words apart (e.g. "café" → "caf").
 WORD_PATTERN = re.compile(r"\b[^\W\d_][^\W\d_]+\b", re.UNICODE)
 
-def preprocess(text, lang_code, lemmatizer_en, spacy_nlp, custom_stops, stop_words):
+# Minimum surviving word length, per language. Default (2, i.e. length>2 →
+# 3+ chars) filters short function words in space-delimited languages. That
+# default would wrongly strip out most real Chinese words — many meaningful
+# words are only 1-2 characters (e.g. 香水 "perfume" is 2 characters) — so
+# Chinese uses a lower floor (1, i.e. length>1 → 2+ chars; still drops
+# single stray characters, which are more likely to be segmentation noise
+# or particles than real content words).
+MIN_LEMMA_LEN = {"zh": 1}
+
+def preprocess(text, lang_code, lemmatizer_en, spacy_nlp, custom_stops, stop_words, jieba_mod=None):
     if not isinstance(text, str) or not text.strip():
         return []
     text = text.lower()
 
-    neg_words = NEGATION_WORDS.get(lang_code, [])
-    if neg_words:
-        neg_pattern = r"\b(" + "|".join(re.escape(w) for w in neg_words) + r")\s+(\w+)"
-        text = re.sub(neg_pattern, r"not_\2", text, flags=re.UNICODE)
+    if lang_code == "zh":
+        # No spaces between words at all — the whitespace-based negation
+        # regex and spaCy/regex tokenizers used below don't apply here.
+        # Segment first, THEN tag negation against the resulting token
+        # sequence (not the raw text), since there's no whitespace to match
+        # against a "next word" the way the other languages' regex does.
+        if jieba_mod is not None:
+            tokens = [t for t in jieba_mod.cut(text) if re.search(r"\w", t)]
+        else:
+            # jieba unavailable — crude last-resort fallback: one token per
+            # character. Far worse than real segmentation (loses multi-
+            # character words entirely) but still produces meaningful
+            # individual glyphs rather than one giant unsplit blob.
+            tokens = [c for c in text if re.search(r"\w", c)]
 
-    if spacy_nlp is not None:
-        # Feed spaCy the raw text directly rather than our own pre-tokenized
-        # words — its tokenizer already understands each language's
-        # contractions/clitics far better than a generic regex would.
-        doc = spacy_nlp(text)
-        lemmas = [tok.lemma_.lower() for tok in doc if tok.is_alpha]
-    elif lang_code == "en":
-        # English fallback if en_core_web_sm isn't installed: NLTK's
-        # WordNet lemmatizer. Noun-only (no POS awareness — "running" won't
-        # become "run"), but still better than no lemmatization at all.
-        tokens = WORD_PATTERN.findall(text)
-        lemmas = [lemmatizer_en.lemmatize(t) for t in tokens]
+        neg_words = NEGATION_WORDS.get(lang_code, [])
+        if neg_words:
+            merged, i, n = [], 0, len(tokens)
+            while i < n:
+                if tokens[i] in neg_words and i + 1 < n:
+                    merged.append("not_" + tokens[i + 1])
+                    i += 2
+                else:
+                    merged.append(tokens[i])
+                    i += 1
+            tokens = merged
+
+        lemmas = tokens  # Chinese doesn't inflect the way European languages
+        # do (no verb conjugation, no plural noun forms) — segmentation is
+        # already close to a lemma; no separate lemmatization step needed.
+
     else:
-        # No spaCy model installed and no fallback lemmatizer for this
-        # language — plain tokenization with no real lemmatization (plurals/
-        # verb forms won't be reduced to a shared dictionary form).
-        lemmas = WORD_PATTERN.findall(text)
+        neg_words = NEGATION_WORDS.get(lang_code, [])
+        if neg_words:
+            neg_pattern = r"\b(" + "|".join(re.escape(w) for w in neg_words) + r")\s+(\w+)"
+            text = re.sub(neg_pattern, r"not_\2", text, flags=re.UNICODE)
+
+        if spacy_nlp is not None:
+            # Feed spaCy the raw text directly rather than our own pre-tokenized
+            # words — its tokenizer already understands each language's
+            # contractions/clitics far better than a generic regex would.
+            doc = spacy_nlp(text)
+            lemmas = [tok.lemma_.lower() for tok in doc if tok.is_alpha]
+        elif lang_code == "en":
+            # English fallback if en_core_web_sm isn't installed: NLTK's
+            # WordNet lemmatizer. Noun-only (no POS awareness — "running" won't
+            # become "run"), but still better than no lemmatization at all.
+            tokens = WORD_PATTERN.findall(text)
+            lemmas = [lemmatizer_en.lemmatize(t) for t in tokens]
+        else:
+            # No spaCy model installed and no fallback lemmatizer for this
+            # language — plain tokenization with no real lemmatization (plurals/
+            # verb forms won't be reduced to a shared dictionary form).
+            lemmas = WORD_PATTERN.findall(text)
 
     # Lemmatize/tokenize FIRST, then filter — the exclusion list should match
     # the word as it actually ends up counted/displayed, not the raw
     # inflected form it happened to take in the source text.
+    min_len = MIN_LEMMA_LEN.get(lang_code, 2)
     return [
         lemma
         for lemma in lemmas
-        if lemma not in stop_words and lemma not in custom_stops and len(lemma) > 2
+        if lemma not in stop_words and lemma not in custom_stops and len(lemma) > min_len
     ]
 
-def build_subcorpus_mask(texts, keywords):
+def build_subcorpus_mask(texts, keywords, lang_code=None):
     """Selects rows for an optional sub-corpus: True if the RAW verbatim text
     (before any tokenization/lemmatization) contains at least one of the
-    given keywords/phrases as a whole word (case-insensitive). Deliberately
-    NOT run on lemmatized tokens — see the sidebar help text for why:
-    lemma behavior differs across languages (English is noun-only; the
-    spaCy-backed languages are POS-aware), so raw-text matching is the only
-    version that means the same thing regardless of language and matches
-    what the user actually typed."""
+    given keywords/phrases (case-insensitive). Deliberately NOT run on
+    lemmatized tokens — see the sidebar help text for why: lemma behavior
+    differs across languages (English is noun-only; the spaCy-backed
+    languages are POS-aware), so raw-text matching is the only version that
+    means the same thing regardless of language and matches what the user
+    actually typed.
+
+    Chinese uses plain substring matching rather than \\b whole-word
+    matching: \\b never occurs between two adjacent CJK characters (both are
+    Unicode 'word' characters with no boundary between them), so a keyword
+    embedded in continuous Chinese text would otherwise silently never
+    match at all — there are no natural word boundaries to anchor to the
+    way there are in space-delimited languages."""
     if not keywords:
         return [True] * len(texts)
+    if lang_code == "zh":
+        keywords_lower = [kw.lower() for kw in keywords]
+        mask = []
+        for t in texts:
+            if not isinstance(t, str) or not t.strip():
+                mask.append(False)
+                continue
+            tl = t.lower()
+            mask.append(any(kw in tl for kw in keywords_lower))
+        return mask
     patterns = [re.compile(r"\b" + re.escape(kw) + r"\b", re.IGNORECASE | re.UNICODE) for kw in keywords]
     mask = []
     for t in texts:
@@ -1140,6 +1249,16 @@ with st.sidebar:
         )
         if _spacy_error:
             st.caption(f"Technical detail: `{_spacy_error}`")
+    if lang_info["code"] == "zh":
+        _jieba_check, _jieba_error = load_jieba()
+        if _jieba_check is None:
+            st.caption(
+                "⚠️ jieba (Chinese word segmentation) failed to load — falling back to crude "
+                "character-by-character splitting until it's fixed. This loses most multi-character "
+                "words entirely, so results will be poor until jieba is working."
+            )
+            if _jieba_error:
+                st.caption(f"Technical detail: `{_jieba_error}`")
     if lang_choice != "English":
         st.caption("ℹ️ Sentiment analysis is English-only and is disabled for this language.")
         st.caption("ℹ️ Spelling correction is English-only and is disabled for this language (testing showed the non-English dictionaries producing wrong-language corrections).")
@@ -1270,7 +1389,7 @@ if uploaded_file and df is not None:
     col = st.selectbox("Text column", df.columns)
 
     if subcorpus_words:
-        preview_mask = build_subcorpus_mask(df[col].tolist(), subcorpus_words)
+        preview_mask = build_subcorpus_mask(df[col].tolist(), subcorpus_words, lang_code=lang_info["code"])
         st.caption(
             f"🎯 Sub-corpus filter active — **{sum(preview_mask)} of {len(df)}** verbatims match "
             f"({', '.join(subcorpus_words)}). The analysis will run on this subset only."
@@ -1290,6 +1409,7 @@ if uploaded_file and df is not None:
     if st.button("🚀 Generate map", use_container_width=True):
         lemmatizer_en = load_lemmatizer()
         spacy_nlp, _ = load_spacy_model(lang_info["spacy_model"])
+        jieba_mod, _ = load_jieba() if lang_info["code"] == "zh" else (None, None)
         stop_words = load_stopwords(lang_info["nltk_stop"])
         sentiment_analyzer = load_sentiment_analyzer() if lang_info["code"] == "en" else None
 
@@ -1302,7 +1422,7 @@ if uploaded_file and df is not None:
             #    filtered subset. ─────────────────────────────────────────────
             n_before_filter = len(df)
             if subcorpus_words:
-                mask = build_subcorpus_mask(df[col].tolist(), subcorpus_words)
+                mask = build_subcorpus_mask(df[col].tolist(), subcorpus_words, lang_code=lang_info["code"])
                 df = df.loc[mask].reset_index(drop=True)
                 if df.empty:
                     st.warning(
@@ -1333,7 +1453,7 @@ if uploaded_file and df is not None:
 
             # Tokenise
             df["tokens"] = df[analysis_col].apply(
-                lambda x: preprocess(x, lang_info["code"], lemmatizer_en, spacy_nlp, all_stops, stop_words)
+                lambda x: preprocess(x, lang_info["code"], lemmatizer_en, spacy_nlp, all_stops, stop_words, jieba_mod)
             )
 
             # ── Phrase detection: merge recurring adjacent word pairs into
