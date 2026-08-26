@@ -59,6 +59,17 @@ LANGUAGES = {
     # conjugation, no plural noun forms), so segmentation alone is close to
     # a lemma already — no separate lemmatization step is needed.
     "Chinese":    {"code": "zh", "nltk_stop": None,         "spacy_model": None},
+    # Japanese, unlike Chinese, DOES have an official spaCy trained pipeline
+    # (ja_core_news_sm), which uses SudachiPy internally for word
+    # segmentation — so it goes through the same spacy_nlp(text) call as
+    # every other spaCy-backed language in preprocess(), no special-casing
+    # needed there. nltk_stop is None (no Japanese corpus in NLTK, same as
+    # Chinese) — compensated via DEFAULT_EXCLUSIONS_BY_LANG["Japanese"].
+    # Deliberately NOT in NEGATION_WORDS: Japanese negation is usually a
+    # suffix attached to the verb itself (e.g. -ない), not a standalone word
+    # sitting before what it negates, so the "tag the next token" trick used
+    # for the other languages doesn't have anything to grab onto here.
+    "Japanese":   {"code": "ja", "nltk_stop": None,         "spacy_model": "ja_core_news_sm"},
 }
 
 # Best-effort negation markers per language. NOTE: this is a simple "tag the
@@ -130,6 +141,19 @@ DEFAULT_EXCLUSIONS_BY_LANG = {
         "里", "外", "个", "些", "怎么", "为什么", "因为", "所以", "但是",
         "可是", "如果", "虽然", "一个", "一些", "这个", "那个", "可以",
         "应该", "会", "要", "能",
+    ],
+    # Same reasoning as Chinese: no NLTK stopword corpus for Japanese, so
+    # this list also covers common grammatical particles/function words
+    # (の/は/を/に/が etc.), not just filler content words.
+    "Japanese": [
+        "製品", "感じ", "本当に", "ただ", "少し", "思う", "たくさん",
+        "作る", "また", "かなり", "何か", "ような", "引き起こす",
+        "見つける", "思い出させる", "の", "は", "を", "に", "が", "で",
+        "と", "も", "な", "し", "から", "まで", "より", "へ", "や", "か",
+        "ね", "よ", "わ", "これ", "それ", "あれ", "この", "その", "あの",
+        "です", "ます", "ある", "いる", "する", "なる", "という", "こと",
+        "もの", "ため", "よう", "って", "たり", "とか", "けど", "でも",
+        "しかし", "だから", "そして", "また", "など",
     ],
 }
 
@@ -264,7 +288,7 @@ def find_cjk_font_path():
             return c
     return None
 
-FONT_OPTIONS["Chinese / CJK (Noto Sans) — needs packages.txt"] = find_cjk_font_path() or _CJK_FONT_CANDIDATES[0]
+FONT_OPTIONS["Chinese / Japanese / CJK (Noto Sans) — needs packages.txt"] = find_cjk_font_path() or _CJK_FONT_CANDIDATES[0]
 
 @st.cache_resource
 def configure_cjk_matplotlib_font():
@@ -374,12 +398,12 @@ WORD_PATTERN = re.compile(r"\b[^\W\d_][^\W\d_]+\b", re.UNICODE)
 
 # Minimum surviving word length, per language. Default (2, i.e. length>2 →
 # 3+ chars) filters short function words in space-delimited languages. That
-# default would wrongly strip out most real Chinese words — many meaningful
-# words are only 1-2 characters (e.g. 香水 "perfume" is 2 characters) — so
-# Chinese uses a lower floor (1, i.e. length>1 → 2+ chars; still drops
-# single stray characters, which are more likely to be segmentation noise
-# or particles than real content words).
-MIN_LEMMA_LEN = {"zh": 1}
+# default would wrongly strip out most real Chinese/Japanese words — many
+# meaningful words are only 1-2 characters (e.g. 香水 "perfume" is 2
+# characters) — so both use a lower floor (1, i.e. length>1 → 2+ chars;
+# still drops single stray characters, which are more likely to be
+# segmentation noise or particles than real content words).
+MIN_LEMMA_LEN = {"zh": 1, "ja": 1}
 
 def preprocess(text, lang_code, lemmatizer_en, spacy_nlp, custom_stops, stop_words, jieba_mod=None):
     if not isinstance(text, str) or not text.strip():
@@ -461,15 +485,15 @@ def build_subcorpus_mask(texts, keywords, lang_code=None):
     means the same thing regardless of language and matches what the user
     actually typed.
 
-    Chinese uses plain substring matching rather than \\b whole-word
-    matching: \\b never occurs between two adjacent CJK characters (both are
-    Unicode 'word' characters with no boundary between them), so a keyword
-    embedded in continuous Chinese text would otherwise silently never
-    match at all — there are no natural word boundaries to anchor to the
-    way there are in space-delimited languages."""
+    Chinese and Japanese use plain substring matching rather than \\b
+    whole-word matching: \\b never occurs between two adjacent CJK
+    characters (both are Unicode 'word' characters with no boundary between
+    them), so a keyword embedded in continuous text would otherwise
+    silently never match at all — there are no natural word boundaries to
+    anchor to the way there are in space-delimited languages."""
     if not keywords:
         return [True] * len(texts)
-    if lang_code == "zh":
+    if lang_code in ("zh", "ja"):
         keywords_lower = [kw.lower() for kw in keywords]
         mask = []
         for t in texts:
@@ -1639,12 +1663,12 @@ if "results" in st.session_state:
     text_col     = res.get("text_col")
     using_tfidf  = res.get("using_tfidf", False)
     lang_code    = res.get("lang_code")
-    if lang_code == "zh":
+    if lang_code in ("zh", "ja"):
         _cjk_font_name = configure_cjk_matplotlib_font()
         if _cjk_font_name is None:
             st.caption(
-                "⚠️ No CJK font found on this system — Chinese characters will render as empty "
-                "boxes in charts until a CJK font is installed (see packages.txt)."
+                "⚠️ No CJK font found on this system — Chinese/Japanese characters will render as "
+                "empty boxes in charts until a CJK font is installed (see packages.txt)."
             )
     target_n_clusters  = res.get("target_n_clusters")
     cluster_match_diff = res.get("cluster_match_diff", 0)
@@ -1895,16 +1919,17 @@ if "results" in st.session_state:
 
     # ── Tab 3: Word Cloud ────────────────────────────────────────────────────
     with tabs[2]:
-        if lang_code == "zh":
+        if lang_code in ("zh", "ja"):
             st.caption(
-                "🈳 Chinese verbatims need a CJK-capable font to render — if you see empty boxes "
-                "instead of characters, make sure **'Chinese / CJK (Noto Sans)'** is selected below."
+                "🈳 Chinese/Japanese verbatims need a CJK-capable font to render — if you see empty "
+                "boxes instead of characters, make sure **'Chinese / Japanese / CJK (Noto Sans)'** "
+                "is selected below."
             )
         wc_col1, wc_col2 = st.columns([2, 1])
         cloud_options = ["Entire sample"] + [f"Cluster {i+1}" for i in range(len(cluster_ids))]
         cloud_scope = wc_col1.selectbox("Show word cloud for:", cloud_options, key="cloud_scope")
         font_names = list(FONT_OPTIONS.keys())
-        default_font_idx = font_names.index("Chinese / CJK (Noto Sans) — needs packages.txt") if lang_code == "zh" else 0
+        default_font_idx = font_names.index("Chinese / Japanese / CJK (Noto Sans) — needs packages.txt") if lang_code in ("zh", "ja") else 0
         font_choice = wc_col2.selectbox("Font", font_names, index=default_font_idx, key="cloud_font")
 
         wc_col3, wc_col4 = st.columns(2)
