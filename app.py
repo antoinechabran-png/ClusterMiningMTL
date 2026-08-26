@@ -781,7 +781,15 @@ def build_html(G, partition, word_freq, color_map, size_map=None, word_sent=None
         {n: size_map.get(n, word_freq.get(n, 1)) for n in G.nodes()}, 12, 42
     )
 
-    net = Network(height="700px", width="100%", bgcolor="#ffffff", font_color="#333333")
+    # cdn_resources="in_line": embeds pyvis's JS/CSS directly in the HTML
+    # instead of writing them to a separate ./lib folder next to wherever
+    # the process's current working directory happens to be. That default
+    # behavior fails with PermissionError on any deployment where the cwd
+    # isn't writable (confirmed via a CMI sandbox traceback: pyvis's
+    # write_html() calls os.makedirs("lib") using a relative path, not tied
+    # to our tempfile's own directory). As a bonus, "in_line" also makes the
+    # exported HTML map fully self-contained — no CDN fetch needed to view it.
+    net = Network(height="700px", width="100%", bgcolor="#ffffff", font_color="#333333", cdn_resources="in_line")
 
     # Ground-truth per-node styling, computed once in Python. This — and NOT
     # anything read back out of the live vis.js DataSet at click-time — is
