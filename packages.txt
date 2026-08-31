@@ -5,4 +5,3 @@ fonts-open-sans
 fonts-roboto
 fonts-lato
 fonts-montserrat
-fonts-nunito
