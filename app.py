@@ -2229,6 +2229,13 @@ if "results" in st.session_state:
 
         iwc_ranked = sorted(iwc_words, key=lambda w: -size_map.get(w, word_freq.get(w, 0)))[:iwc_max_words]
 
+        # CSS class/key tokens can't contain spaces (a space inside a CSS
+        # class selector splits it into two separate selectors, silently
+        # breaking the match) — "Entire sample" and "Cluster 1" both have
+        # one, so build a sanitized, alphanumeric-only token for widget keys
+        # and CSS selectors instead of using the scope label directly.
+        iwc_scope_safe = re.sub(r"[^A-Za-z0-9]+", "_", iwc_scope)
+
         if iwc_ranked:
             iwc_vals = [size_map.get(w, word_freq.get(w, 0)) for w in iwc_ranked]
             iwc_min, iwc_max = min(iwc_vals), max(iwc_vals)
@@ -2243,7 +2250,7 @@ if "results" in st.session_state:
                 font_px = int(13 + t * 20)
                 wcid = best_p.get(w)
                 wcolor = color_map.get(wcid, "#333333")
-                btn_key = f"iwc_btn_{iwc_scope}_{i}"
+                btn_key = f"iwc_btn_{iwc_scope_safe}_{i}"
                 css_rules.append(
                     f".st-key-{btn_key} button {{ font-size:{font_px}px !important; "
                     f"font-weight:700 !important; color:{wcolor} !important; "
@@ -2255,7 +2262,7 @@ if "results" in st.session_state:
             n_cols = 6
             iwc_cols = st.columns(n_cols)
             for i, w in enumerate(iwc_ranked):
-                btn_key = f"iwc_btn_{iwc_scope}_{i}"
+                btn_key = f"iwc_btn_{iwc_scope_safe}_{i}"
                 with iwc_cols[i % n_cols]:
                     if st.button(display_label(w), key=btn_key, use_container_width=False):
                         st.session_state["iwc_selected_word"] = w
