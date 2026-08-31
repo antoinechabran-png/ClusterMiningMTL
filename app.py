@@ -338,50 +338,121 @@ def _mpl_bundled_font(filename):
     except Exception:
         return None
 
+def _find_installed_font(family_name):
+    """Asks fontconfig (present on virtually any Linux system with fonts
+    installed — no extra dependency) to resolve a font family name to its
+    actual installed file path. Used instead of hardcoding exact filenames
+    for system-installed fonts: Debian/RHEL font packages don't agree on a
+    single naming convention (classic 'Inter-Regular.ttf' vs. a single
+    variable-font file like 'Inter[slnt,wght].ttf'), and guessing wrong here
+    has cost real deploy cycles elsewhere in this app's history. fc-match
+    always returns SOME font (falling back to a default if the requested
+    family isn't installed), so the returned family name is checked against
+    what was asked for rather than trusting that a result means a match."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["fc-match", family_name, "-f", "%{family}|||%{file}"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode != 0 or not result.stdout:
+            return None
+        matched_family, _, matched_file = result.stdout.partition("|||")
+        if family_name.lower() not in matched_family.lower():
+            return None  # fontconfig fell back to an unrelated font — not actually installed
+        return matched_file if os.path.exists(matched_file) else None
+    except Exception:
+        return None
+
+def _resolve_premium_font(family_name, repo_filename):
+    """Resolution order: (1) a repo-relative fonts/ file — always reliable
+    when present, since it doesn't depend on any system package; (2) a
+    system-installed font discovered via fontconfig, regardless of that
+    package's exact file-naming convention; (3) the repo-relative path as a
+    last resort, purely so the existing 'file not found' UI warning has a
+    concrete path to report instead of silently doing nothing."""
+    repo_path = f"fonts/{repo_filename}"
+    if os.path.exists(repo_path):
+        return repo_path
+    installed = _find_installed_font(family_name)
+    if installed:
+        return installed
+    return repo_path
+
 FONT_OPTIONS = {
     "Default (DejaVu Sans)": None,
     "DejaVu Sans Bold":      _mpl_bundled_font("DejaVuSans-Bold.ttf"),
     "DejaVu Serif":          _mpl_bundled_font("DejaVuSerif.ttf"),
     "DejaVu Serif Bold":     _mpl_bundled_font("DejaVuSerif-Bold.ttf"),
     "STIX General (serif)":  _mpl_bundled_font("STIXGeneral.ttf"),
-    "Inter — needs setup":      "fonts/Inter-Regular.ttf",
-    "Open Sans — needs setup":  "fonts/OpenSans-Regular.ttf",
-    "Roboto — needs setup":     "fonts/Roboto-Regular.ttf",
-    "Lato — needs setup":       "fonts/Lato-Regular.ttf",
-    "Montserrat — needs setup": "fonts/Montserrat-Regular.ttf",
-    "Nunito — needs setup":     "fonts/Nunito-Regular.ttf",
+    "Inter — needs setup":      _resolve_premium_font("Inter", "Inter-Regular.ttf"),
+    "Open Sans — needs setup":  _resolve_premium_font("Open Sans", "OpenSans-Regular.ttf"),
+    "Roboto — needs setup":     _resolve_premium_font("Roboto", "Roboto-Regular.ttf"),
+    "Lato — needs setup":       _resolve_premium_font("Lato", "Lato-Regular.ttf"),
+    "Montserrat — needs setup": _resolve_premium_font("Montserrat", "Montserrat-Regular.ttf"),
+    "Nunito — needs setup":     _resolve_premium_font("Nunito", "Nunito-Regular.ttf"),
 }
 
-# ─── CJK font support (Chinese) ────────────────────────────────────────────────
+# ─── CJK font support (Chinese, Japanese) ──────────────────────────────────
 # None of the fonts above contain any Chinese/Japanese/Korean glyphs at
 # all — matplotlib's bundled DejaVu/STIX fonts are Latin/Greek/Cyrillic
 # only, and WordCloud's own built-in default font is the same story. Without
-# a CJK-capable font, every Chinese character renders as an empty box (a
+# a CJK-capable font, every CJK character renders as an empty box (a
 # "missing glyph" placeholder — not a bug in our code, just what any text
 # renderer does when the font it's using doesn't contain that character).
 # This affects every matplotlib chart the app draws, not only the word
 # cloud image, since matplotlib's default font is the same DejaVu Sans.
 #
-# Fix: install a CJK font at the SYSTEM level via packages.txt (Streamlit
-# Cloud's apt-get mechanism — see packages.txt) rather than trying to bundle
-# a font file in the repo. Below just searches the common install paths for
-# it and registers it with matplotlib if found.
+# Two ways a CJK font can end up available, checked in this order:
+#  1. Repo-relative "fonts/" files — bundled directly in the project, same
+#     pattern as the optional Inter/Roboto fonts. This is the RELIABLE path:
+#     it works identically on every deployment platform, since it's just a
+#     file the app reads rather than something installed at the OS level.
+#     packages.txt (apt-get) is a Streamlit Community Cloud-specific
+#     convention — other deployment pipelines (custom Dockerfiles/Containerfiles,
+#     internal CI/CD) don't read it at all, so it silently does nothing there;
+#     and even a corrected system-package name isn't guaranteed to exist,
+#     since a locked-down internal base image may not have the repo that
+#     package lives in enabled. To use this, download a Noto Sans CJK file
+#     (e.g. from https://fonts.google.com/noto/specimen/Noto+Sans+SC or
+#     https://github.com/notofonts/noto-cjk/releases) and commit it into the
+#     repo at fonts/NotoSansCJK-Regular.ttc (or .otf).
+#  2. System-installed fonts — works out of the box on Streamlit Community
+#     Cloud via packages.txt (apt: fonts-noto-cjk). On Red Hat/UBI-based
+#     images the equivalent system package is instead named
+#     google-noto-cjk-fonts (RHEL 8) or google-noto-sans-cjk-fonts
+#     (Fedora/EPEL) — but whether that package is actually reachable depends
+#     on which repos the base image has enabled, which varies by
+#     organization and isn't something this app can control or detect.
 _CJK_FONT_CANDIDATES = [
+    "fonts/NotoSansCJK-Regular.ttc",
+    "fonts/NotoSansCJK-Regular.otf",
+    "fonts/NotoSansSC-Regular.otf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
     "/usr/share/fonts/truetype/noto-cjk/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    # Red Hat/UBI/Fedora paths (google-noto-cjk-fonts / google-noto-sans-cjk-fonts)
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/google-noto-sans-cjk-ttc-fonts/NotoSansCJK-Regular.ttc",
 ]
 
 def find_cjk_font_path():
     for c in _CJK_FONT_CANDIDATES:
         if os.path.exists(c):
             return c
+    # Fall back to fontconfig discovery — catches CJK fonts installed under
+    # a filename none of the hardcoded candidates above happened to guess.
+    for family in ("Noto Sans CJK SC", "Noto Sans CJK", "Noto Sans SC", "WenQuanYi Zen Hei"):
+        found = _find_installed_font(family)
+        if found:
+            return found
     return None
 
-FONT_OPTIONS["Chinese / Japanese / CJK (Noto Sans) — needs packages.txt"] = find_cjk_font_path() or _CJK_FONT_CANDIDATES[0]
+FONT_OPTIONS["Chinese / Japanese / CJK (Noto Sans) — needs setup"] = find_cjk_font_path() or _CJK_FONT_CANDIDATES[0]
 
 @st.cache_resource
 def configure_cjk_matplotlib_font():
@@ -1780,8 +1851,11 @@ if "results" in st.session_state:
         _cjk_font_name = configure_cjk_matplotlib_font()
         if _cjk_font_name is None:
             st.caption(
-                "⚠️ No CJK font found on this system — Chinese/Japanese characters will render as "
-                "empty boxes in charts until a CJK font is installed (see packages.txt)."
+                "⚠️ No CJK font found — Chinese/Japanese characters will render as empty boxes in "
+                "charts until one is available. Either add a Noto Sans CJK font file to `fonts/` in "
+                "the repo (works on any platform), or install a system CJK font package (see "
+                "packages.txt on Streamlit Community Cloud, or an equivalent apt/dnf package "
+                "elsewhere)."
             )
     target_n_clusters  = res.get("target_n_clusters")
     cluster_match_diff = res.get("cluster_match_diff", 0)
@@ -1907,7 +1981,7 @@ if "results" in st.session_state:
     )
 
     # ── Tabs ─────────────────────────────────────────────────────────────────
-    tab_labels = ["🌐 Interactive Map", "🔵 Cluster Bubbles", "☁️ Word Cloud", "🔬 Drill-Down"]
+    tab_labels = ["🌐 Interactive Map", "🔵 Cluster Bubbles", "☁️ Word Cloud", "🖱️ Interactive Word Cloud", "🔬 Drill-Down"]
     if group_freqs:
         tab_labels.append("🔀 Group Comparison")
     tabs = st.tabs(tab_labels)
@@ -2042,7 +2116,7 @@ if "results" in st.session_state:
         cloud_options = ["Entire sample"] + [f"Cluster {i+1}" for i in range(len(cluster_ids))]
         cloud_scope = wc_col1.selectbox("Show word cloud for:", cloud_options, key="cloud_scope")
         font_names = list(FONT_OPTIONS.keys())
-        default_font_idx = font_names.index("Chinese / Japanese / CJK (Noto Sans) — needs packages.txt") if lang_code in ("zh", "ja") else 0
+        default_font_idx = font_names.index("Chinese / Japanese / CJK (Noto Sans) — needs setup") if lang_code in ("zh", "ja") else 0
         font_choice = wc_col2.selectbox("Font", font_names, index=default_font_idx, key="cloud_font")
 
         wc_col3, wc_col4 = st.columns(2)
@@ -2136,8 +2210,84 @@ if "results" in st.session_state:
         else:
             st.info("No words to display for this selection.")
 
-    # ── Tab 4: Hierarchical Drill-Down + Respondent-level Drill-down ────────
+    # ── Tab 4: Interactive Word Cloud (click a word → its verbatims) ────────
     with tabs[3]:
+        st.caption(
+            "A clickable word cloud — each word is a real button, sized by frequency (or TF-IDF) "
+            "and colored by cluster. Click one to see up to 50 verbatims that mention it, right below."
+        )
+        iwc_scope_options = ["Entire sample"] + [f"Cluster {i+1}" for i in range(len(cluster_ids))]
+        iwc_scope = st.selectbox("Show words for:", iwc_scope_options, key="iwc_scope")
+        iwc_max_words = st.slider("Number of words shown", 20, 100, 48, key="iwc_max_words")
+
+        if iwc_scope == "Entire sample":
+            iwc_words = list(word_freq.keys())
+        else:
+            iwc_idx = int(iwc_scope.split(" ")[1]) - 1
+            iwc_cid = cluster_ids[iwc_idx]
+            iwc_words = [w for w, c in best_p.items() if c == iwc_cid]
+
+        iwc_ranked = sorted(iwc_words, key=lambda w: -size_map.get(w, word_freq.get(w, 0)))[:iwc_max_words]
+
+        if iwc_ranked:
+            iwc_vals = [size_map.get(w, word_freq.get(w, 0)) for w in iwc_ranked]
+            iwc_min, iwc_max = min(iwc_vals), max(iwc_vals)
+
+            # Font-size/color CSS per button, keyed to each word's own button —
+            # Streamlit auto-assigns a ".st-key-<key>" class to any widget
+            # given an explicit key, which lets us style each one individually.
+            css_rules = []
+            for i, w in enumerate(iwc_ranked):
+                val = size_map.get(w, word_freq.get(w, 0))
+                t = (val - iwc_min) / (iwc_max - iwc_min) if iwc_max > iwc_min else 0.5
+                font_px = int(13 + t * 20)
+                wcid = best_p.get(w)
+                wcolor = color_map.get(wcid, "#333333")
+                btn_key = f"iwc_btn_{iwc_scope}_{i}"
+                css_rules.append(
+                    f".st-key-{btn_key} button {{ font-size:{font_px}px !important; "
+                    f"font-weight:700 !important; color:{wcolor} !important; "
+                    f"border-color:{wcolor}66 !important; padding:2px 12px !important; "
+                    f"line-height:1.8 !important; }}"
+                )
+            st.markdown(f"<style>{''.join(css_rules)}</style>", unsafe_allow_html=True)
+
+            n_cols = 6
+            iwc_cols = st.columns(n_cols)
+            for i, w in enumerate(iwc_ranked):
+                btn_key = f"iwc_btn_{iwc_scope}_{i}"
+                with iwc_cols[i % n_cols]:
+                    if st.button(display_label(w), key=btn_key, use_container_width=False):
+                        st.session_state["iwc_selected_word"] = w
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            iwc_selected = st.session_state.get("iwc_selected_word")
+            if iwc_selected and iwc_selected in iwc_ranked:
+                iwc_mask = resp_df["tokens"].apply(lambda toks: iwc_selected in toks)
+                iwc_matches = resp_df.loc[iwc_mask]
+                iwc_total = len(iwc_matches)
+                iwc_shown = iwc_matches.head(50)
+                st.markdown(f"**Verbatims mentioning '{display_label(iwc_selected)}'** — showing {len(iwc_shown)} of {iwc_total}")
+                iwc_show_cols = [text_col] + ([group_col] if group_col else [])
+                st.dataframe(iwc_shown[iwc_show_cols], use_container_width=True, height=300)
+                if len(iwc_shown):
+                    iwc_csv = iwc_shown[iwc_show_cols].to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        "💾 Download these verbatims (CSV)",
+                        data=iwc_csv,
+                        file_name=f"verbatims_{iwc_selected}.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                        key="download_iwc_verbatims_csv",
+                    )
+            else:
+                st.info("Click a word above to see its verbatims here.")
+        else:
+            st.info("No words to display for this selection.")
+
+    # ── Tab 5: Hierarchical Drill-Down + Respondent-level Drill-down ────────
+    with tabs[4]:
         st.markdown("### 🔬 Hierarchical Drill-Down")
         st.caption("Zoom into one cluster and re-run clustering on just its words to reveal sub-structure.")
         drill_options = ["None"] + [f"Cluster {i+1}" for i in range(len(cluster_ids))]
@@ -2244,9 +2394,9 @@ if "results" in st.session_state:
             key="download_cooc_xlsx",
         )
 
-    # ── Tab 5: Group Comparison & Diff View (only if a group column is set) ─
+    # ── Tab 6: Group Comparison & Diff View (only if a group column is set) ─
     if group_freqs:
-        with tabs[4]:
+        with tabs[5]:
             gnames = list(group_freqs.keys())
             if len(gnames) < 2:
                 st.info(f"Only one group value found in '{group_col}' — need at least two to compare.")
